@@ -17,6 +17,7 @@ import { BootLoadingScreen } from './features/workspace/BootLoadingScreen'
 export default function App() {
   const [authRoute, setAuthRoute] = useState<AuthRoute | null>(() => getAuthRoute())
   const lastAuthRouteRef = useRef<AuthRoute | null>(authRoute)
+  const authEventRevision = useRef(0)
   const [session, setSession] = useState<Session | null>(null)
   const [sessionLoading, setSessionLoading] = useState(true)
   const [isDarkMode, setIsDarkMode] = useState(() => localStorage.getItem('sentinel-theme') === 'dark')
@@ -38,11 +39,28 @@ export default function App() {
       }
       setAuthRoute(null)
     }
-    void supabase.auth.getSession().then(({ data: sessionData }) => {
-      setSession(sessionData.session)
+    void supabase.auth.getSession().then(({ data: sessionData, error }) => {
+      if (authEventRevision.current !== 0) return
+      if (error && import.meta.env.DEV) {
+        console.error('[Auth] Session restoration failed', {
+          code: error.code,
+          message: error.message,
+        })
+      }
+      setSession(error ? null : sessionData.session)
+      setSessionLoading(false)
+    }).catch((caught: unknown) => {
+      if (authEventRevision.current !== 0) return
+      if (import.meta.env.DEV) {
+        console.error('[Auth] Session restoration failed', {
+          message: caught instanceof Error ? caught.message : 'Unknown session restoration failure',
+        })
+      }
+      setSession(null)
       setSessionLoading(false)
     })
     const { data } = supabase.auth.onAuthStateChange((event, nextSession) => {
+      authEventRevision.current += 1
       setSession(nextSession)
       setSessionLoading(false)
       if (event === 'PASSWORD_RECOVERY') {
@@ -88,7 +106,7 @@ export default function App() {
   if (protectedRoute) {
     if (sessionLoading) return <BootLoadingScreen label="Checking your session…" isDarkMode={isDarkMode} />
     if (!session) return <SignInPage />
-    return <ProtectedApp session={session} isDarkMode={isDarkMode} onToggleTheme={toggleTheme} />
+    return <ProtectedApp key={session.user.id} session={session} isDarkMode={isDarkMode} onToggleTheme={toggleTheme} />
   }
 
   return <LandingPage isDarkMode={isDarkMode} onToggleTheme={toggleTheme} />

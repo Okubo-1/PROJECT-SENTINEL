@@ -49,6 +49,68 @@ export interface SafetyPolicyDraft {
 const frequencies = new Set<SafetyPolicyFrequency>(['every_login', 'first_login', 'interval_days', 'weekly'])
 const SAFETY_POLICY_REQUEST_TIMEOUT_MS = 12_000
 
+interface SafetyPolicyRpcError {
+  code?: string
+  message?: string
+  details?: string
+  hint?: string
+  status?: number
+}
+
+function logSafetyPolicyFailure(operation: string, error: SafetyPolicyRpcError | Error) {
+  if (!import.meta.env.DEV) return
+  if (error instanceof Error) {
+    console.error(`[SafetyPolicy] ${operation} failed`, {
+      name: error.name,
+      message: error.message,
+    })
+    return
+  }
+  console.error(`[SafetyPolicy] ${operation} failed`, {
+    code: error.code,
+    message: error.message,
+    details: error.details,
+    hint: error.hint,
+    status: error.status,
+  })
+}
+
+function verificationErrorMessage(error: SafetyPolicyRpcError): string {
+  switch (error.code) {
+    case 'PGRST202':
+    case '42883':
+      return 'Safety Policy verification is unavailable because its database function is missing. Contact your administrator.'
+    case '42P01':
+    case '42703':
+      return 'Safety Policy verification is unavailable because its database configuration is incomplete. Contact your administrator.'
+    case '42501':
+      return 'Your account is not permitted to verify this organisation’s Safety Policy. Contact your administrator.'
+    case '28000':
+    case 'PGRST301':
+      return 'Your sign-in session could not be verified. Sign out and sign in again.'
+    default:
+      return 'We could not verify your company safety policy. Please retry or contact your administrator.'
+  }
+}
+
+function acknowledgementErrorMessage(error: SafetyPolicyRpcError): string {
+  switch (error.code) {
+    case 'PGRST202':
+    case '42883':
+      return 'Saving your acknowledgement is unavailable because its database function is missing. Contact your administrator.'
+    case '42P01':
+    case '42703':
+      return 'Your acknowledgement could not be saved because the Safety Policy database configuration is incomplete.'
+    case '42501':
+      return 'Your account is not permitted to acknowledge this organisation’s Safety Policy.'
+    case '28000':
+    case 'PGRST301':
+      return 'Your sign-in session could not be verified. Sign out and sign in again.'
+    default:
+      return 'We could not save your acknowledgement. Please retry.'
+  }
+}
+
 async function withSafetyPolicyTimeout<T>(request: PromiseLike<T>): Promise<T> {
   let timeoutId = 0
   try {
@@ -111,11 +173,15 @@ export async function getSafetyPolicyStatus(client: SupabaseClient): Promise<Saf
   try {
     response = await withSafetyPolicyTimeout(client.rpc('get_safety_policy_status'))
   } catch (caught) {
+    logSafetyPolicyFailure('Status request', caught instanceof Error ? caught : new Error('Unknown request failure'))
     if (caught instanceof Error && caught.message.includes('longer than expected')) throw caught
     throw new Error('We could not verify your company safety policy. Check your connection and retry.')
   }
   const { data, error } = response
-  if (error) throw new Error('We could not verify your company safety policy. Please retry or contact your administrator.')
+  if (error) {
+    logSafetyPolicyFailure('Status RPC', error)
+    throw new Error(verificationErrorMessage(error))
+  }
 
   try {
     const result = objectValue(data)
@@ -151,8 +217,12 @@ export async function getSafetyPolicyStatus(client: SupabaseClient): Promise<Saf
         timezone: stringValue(policyData.timezone, 'UTC'),
       },
     }
-  } catch {
-    throw new Error('We could not verify your company safety policy. Please retry or contact your administrator.')
+  } catch (caught) {
+    logSafetyPolicyFailure(
+      'Status response validation',
+      caught instanceof Error ? caught : new Error('Invalid response'),
+    )
+    throw new Error('The Safety Policy service returned an invalid response. Contact your administrator.')
   }
 }
 
@@ -161,10 +231,24 @@ export async function acknowledgeSafetyPolicy(client: SupabaseClient): Promise<v
   try {
     response = await withSafetyPolicyTimeout(client.rpc('acknowledge_safety_policy'))
   } catch (caught) {
+    logSafetyPolicyFailure('Acknowledgement request', caught instanceof Error ? caught : new Error('Unknown request failure'))
     if (caught instanceof Error && caught.message.includes('longer than expected')) throw caught
     throw new Error('We could not save your acknowledgement. Please retry.')
   }
-  if (response.error) throw new Error('We could not save your acknowledgement. Please retry.')
+  if (response.error) {
+    logSafetyPolicyFailure('Acknowledgement RPC', response.error)
+    throw new Error(acknowledgementErrorMessage(response.error))
+  }
+  try {
+    const result = objectValue(response.data)
+    if (result.acknowledged !== true) throw new Error('Acknowledgement was not confirmed by the database.')
+  } catch (caught) {
+    logSafetyPolicyFailure(
+      'Acknowledgement response validation',
+      caught instanceof Error ? caught : new Error('Invalid response'),
+    )
+    throw new Error('The database did not confirm your Safety Policy acknowledgement. Please retry.')
+  }
 }
 
 export async function getSafetyPolicySettings(client: SupabaseClient): Promise<SafetyPolicySettings> {

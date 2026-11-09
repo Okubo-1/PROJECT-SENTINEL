@@ -275,11 +275,13 @@ using (public.can_view_action(organization_id, id)
 with check (public.is_org_member(organization_id)
   and (public.has_inspection_action_permission(organization_id, 'manage_actions') or assignee_id = (select auth.uid())));
 
-grant select, insert, update on public.inspections to authenticated;
-grant select, insert, update on public.actions to authenticated;
+revoke all on public.inspections, public.actions from public, anon, authenticated;
+grant select, insert, update on public.inspections, public.actions to authenticated;
 
 insert into storage.buckets (id, name, public, file_size_limit)
-values ('incident-evidence', 'incident-evidence', false, 10485760) on conflict (id) do nothing;
+values ('incident-evidence', 'incident-evidence', false, 10485760)
+on conflict (id) do update
+set name = excluded.name, public = excluded.public, file_size_limit = excluded.file_size_limit;
 
 create policy inspection_action_evidence_select on storage.objects for select to authenticated
 using (
