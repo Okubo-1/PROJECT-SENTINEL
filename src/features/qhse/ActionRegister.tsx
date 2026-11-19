@@ -13,7 +13,7 @@ function actionTypeLabel(type: ActionType) {
   return type === 'corrective' ? 'Corrective' : type === 'preventive' ? 'Preventive' : 'Investigation'
 }
 
-export function ActionRegister({ filteredActions, workspaceLoading, currentTime, currentUserId, canManage, assignedOnly, busy, resolutionAction, resolutionNotes, sites, people, linkedIncidents, onToggleResolve, onResolutionNotesChange, onProofFileChange, onCancelResolve, onResolve, onReassign, onDownloadProof }: {
+export function ActionRegister({ filteredActions, workspaceLoading, currentTime, currentUserId, canManage, assignedOnly, busy, resolutionAction, resolutionNotes, proofFile, sites, people, linkedIncidents, onToggleResolve, onResolutionNotesChange, onProofFileChange, onCancelResolve, onResolve, onReassign, onDownloadProof }: {
   filteredActions: ActionRecord[]
   workspaceLoading: boolean
   currentTime: number
@@ -23,6 +23,7 @@ export function ActionRegister({ filteredActions, workspaceLoading, currentTime,
   busy: boolean
   resolutionAction: string | null
   resolutionNotes: string
+  proofFile: File | null
   sites: QhseSite[]
   people: QhsePerson[]
   linkedIncidents: EligibleIncident[]
@@ -148,18 +149,21 @@ export function ActionRegister({ filteredActions, workspaceLoading, currentTime,
                             <p className="text-sm text-muted">{action.description}</p>
                           </div>
                           <div className="grid gap-4 sm:grid-cols-2">
-                            <Field label="Resolution notes" className="sm:col-span-2">
-                              <Textarea rows={3} value={resolutionNotes} onChange={(event) => onResolutionNotesChange(event.target.value)} />
+                            <Field label="Resolution details (required)" className="sm:col-span-2">
+                              {linkedIncidents.find((incident) => incident.id === action.incident_id)?.is_anonymous && (
+                                <p className="mb-2 text-sm text-muted">Do not include names or details that could identify you.</p>
+                              )}
+                              <Textarea rows={3} required value={resolutionNotes} onChange={(event) => onResolutionNotesChange(event.target.value)} />
                             </Field>
-                            <Field label="Photo or proof (optional)" className="sm:col-span-2">
-                              <Input type="file" accept="image/jpeg,image/png,image/webp,application/pdf" onChange={(event) => onProofFileChange(event.target.files?.[0] || null)} />
+                            <Field label="Photo or document evidence (required)" className="sm:col-span-2">
+                              <Input type="file" required accept="image/jpeg,image/png,image/webp,application/pdf" onChange={(event) => onProofFileChange(event.target.files?.[0] || null)} />
                             </Field>
                           </div>
                           <div className="flex flex-wrap justify-end gap-2">
                             <Button variant="ghost" size="sm" onClick={onCancelResolve}>
                               Cancel
                             </Button>
-                            <Button size="sm" loading={busy} onClick={() => onResolve(action)}>
+                            <Button size="sm" disabled={!resolutionNotes.trim() || !proofFile} loading={busy} onClick={() => onResolve(action)}>
                               Confirm resolution
                             </Button>
                           </div>

@@ -29,6 +29,7 @@ import type { DataTableColumn, FileUploadItem } from '../../components/ui'
 import { createInspection, downloadQhseFile, getInspectionWorkspace, validateQhseFile } from './inspectionActionService'
 import type { InspectionRecord, QhsePerson, QhseSite } from './inspectionActionService'
 import { companySettingsEventMatchesOrganization, companySettingsUpdatedEvent } from '../../lib/companySettingsSync'
+import { InvestigationRegister } from './InvestigationRegister'
 
 const acceptedFileTypes = 'image/jpeg,image/png,image/webp,application/pdf'
 
@@ -105,10 +106,12 @@ export function InspectionWorkspace({
   supabase,
   canManageActions = false,
   canCreate = true,
+  canViewInvestigations = false,
 }: {
   supabase: SupabaseClient
   canManageActions?: boolean
   canCreate?: boolean
+  canViewInvestigations?: boolean
 }) {
   const queryClient = useQueryClient()
   const [sites, setSites] = useState<QhseSite[]>([])
@@ -133,8 +136,8 @@ export function InspectionWorkspace({
   const [rangeFilter, setRangeFilter] = useState<'30' | '90' | 'all'>('all')
   const [currentTime, setCurrentTime] = useState(() => Date.now())
 
-  const refresh = useCallback(async () => {
-    setLoading(true)
+  const refresh = useCallback(async (background = false) => {
+    if (!background) setLoading(true)
     try {
       const data = await getInspectionWorkspace(supabase)
       setOrganizationId(data.organizationId)
@@ -145,7 +148,7 @@ export function InspectionWorkspace({
       setSiteId((current) => current || data.activeSites[0]?.id || '')
       setError('')
     } finally {
-      setLoading(false)
+      if (!background) setLoading(false)
     }
   }, [supabase])
 
@@ -177,7 +180,7 @@ export function InspectionWorkspace({
     if (!organizationId) return
     const handleSettingsUpdated = (event: Event) => {
       if (!companySettingsEventMatchesOrganization(event, organizationId)) return
-      void refresh().catch((loadError: unknown) => {
+      void refresh(true).catch((loadError: unknown) => {
         setError(loadError instanceof Error ? loadError.message : 'Unable to refresh inspections.')
       })
     }
@@ -523,6 +526,9 @@ export function InspectionWorkspace({
   const tabs = [
     ...(canCreate ? [{ id: 'log', label: 'Log inspection', content: logTab }] : []),
     { id: 'recent', label: 'Recent inspections', content: recentTab },
+    ...(canViewInvestigations && organizationId
+      ? [{ id: 'investigations', label: 'Investigations', content: <InvestigationRegister client={supabase} organizationId={organizationId} /> }]
+      : []),
   ]
 
   return (
@@ -539,7 +545,7 @@ export function InspectionWorkspace({
 
       <Tabs
         items={tabs}
-        value={canCreate ? activeTab : 'recent'}
+        value={canCreate || canViewInvestigations ? activeTab : 'recent'}
         onChange={(id) => setActiveTab(id)}
         className="gap-5"
       />

@@ -60,6 +60,9 @@ export function ActionCreateForm({ type, onTypeChange, siteId, onSiteChange, ass
             </FormFull>
             <FormFull>
               <Field label="Description" htmlFor="action-description" required>
+                {eligibleIncidents.find((incident) => incident.id === incidentId)?.is_anonymous && (
+                  <p className="mb-2 text-sm text-muted">Do not include names or details that could identify you.</p>
+                )}
                 <Textarea id="action-description" rows={4} value={description} onChange={(event) => onDescriptionChange(event.target.value)} required />
               </Field>
             </FormFull>

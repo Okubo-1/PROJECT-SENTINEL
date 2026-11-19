@@ -8,7 +8,7 @@ const bucket = 'incident-evidence'
 
 export type QhseSite = { id: string; name: string }
 export type QhsePerson = { id: string; full_name: string }
-export type EligibleIncident = { id: string; reference_number: string; title: string; status: string }
+export type EligibleIncident = { id: string; reference_number: string; title: string; status: string; is_anonymous: boolean }
 export type ActionType = 'preventive' | 'corrective' | 'investigation'
 export type InspectionRecord = {
   id: string
@@ -156,7 +156,7 @@ export async function getActionsWorkspace(client: SupabaseClient, assignedOnly =
   if (!assignedOnly) {
     for (let offset = 0; ; offset += 500) {
       const { data: page, error: incidentError } = await client.from('incidents')
-        .select('id, reference_number, title, status')
+        .select('id, reference_number, title, status, is_anonymous')
         .eq('organization_id', context.organizationId)
         .in('status', ['submitted', 'under_review', 'investigation', 'corrective_action', 'pending_verification'])
         .order('created_at', { ascending: false })
@@ -173,7 +173,7 @@ export async function getActionsWorkspace(client: SupabaseClient, assignedOnly =
   let linkedIncidents: EligibleIncident[] = []
   if (linkedIncidentIds.length) {
     const { data: linkedRows, error: linkedIncidentsError } = await client.from('incidents')
-      .select('id, reference_number, title, status')
+      .select('id, reference_number, title, status, is_anonymous')
       .eq('organization_id', context.organizationId)
       .in('id', linkedIncidentIds)
     if (linkedIncidentsError) throw new Error('Unable to load linked incident references for actions.')
@@ -209,7 +209,8 @@ export async function createAction(client: SupabaseClient, input: { type: Action
   }).select('id').single()
   if (error) throw new Error(error.message || 'Unable to create the action.')
   if (!action) throw new Error('The action could not be saved.')
-  return notifyActionAssignment(client, action.id)
+  const notificationResult = await notifyActionAssignment(client, action.id)
+  return { ...notificationResult, actionId: action.id }
 }
 
 async function notifyActionAssignment(client: SupabaseClient, actionId: string) {
@@ -221,12 +222,20 @@ async function notifyActionAssignment(client: SupabaseClient, actionId: string) 
   }
 }
 
-export type LinkedIncidentAction = Pick<ActionRecord, 'id' | 'incident_id' | 'type' | 'description' | 'assignee_id' | 'due_at' | 'status' | 'assigned_at' | 'resolved_at'>
+export type LinkedIncidentAction = Omit<Pick<ActionRecord, 'id' | 'incident_id' | 'type' | 'description' | 'assignee_id' | 'due_at' | 'status' | 'assigned_at' | 'resolved_at' | 'resolved_by'>, 'assignee_id'> & {
+  assignee_id: string | null
+}
+
+export async function getVerifierIncidentActions(client: SupabaseClient, incidentId: string): Promise<LinkedIncidentAction[]> {
+  const { data, error } = await client.rpc('get_verifier_incident_actions', { target_incident_id: incidentId })
+  if (error) throw new Error('Unable to load actions linked to this incident.')
+  return (data || []) as LinkedIncidentAction[]
+}
 
 export async function getActionsForIncidents(client: SupabaseClient, organizationId: string, incidentIds: string[]) {
   if (!incidentIds.length) return [] as LinkedIncidentAction[]
   const { data, error } = await client.from('actions')
-    .select('id, incident_id, type, description, assignee_id, due_at, status, assigned_at, resolved_at')
+    .select('id, incident_id, type, description, assignee_id, due_at, status, assigned_at, resolved_at, resolved_by')
     .eq('organization_id', organizationId)
     .in('incident_id', incidentIds)
     .order('assigned_at', { ascending: false })
@@ -244,19 +253,19 @@ export async function reassignAction(client: SupabaseClient, actionId: string, a
 
 export async function resolveAction(client: SupabaseClient, action: ActionRecord, notes: string, file?: File | null) {
   const context = await getOrganizationContext(client)
+  if (!notes.trim()) throw new Error('Enter resolution details before resolving this action.')
+  if (!file) throw new Error('Upload a photo or document as resolution evidence.')
   validateQhseFile(file)
   let path: string | null = null
-  if (file) {
-    path = `${context.organizationId}/actions/${action.id}/${context.userId}/${storageFilename(file)}`
-    await storeFile(client, path, file)
-  }
+  path = `${context.organizationId}/actions/${action.id}/${context.userId}/${storageFilename(file)}`
+  await storeFile(client, path, file)
   const { data, error } = await client.from('actions').update({
     status: 'resolved',
-    resolution_notes: notes.trim() || null,
+    resolution_notes: notes.trim(),
     proof_storage_path: path,
-    proof_file_name: file?.name || null,
-    proof_file_type: file?.type || null,
-    proof_file_size: file?.size || null,
+    proof_file_name: file.name,
+    proof_file_type: file.type,
+    proof_file_size: file.size,
   }).eq('id', action.id).eq('organization_id', context.organizationId).eq('status', 'open').select('id').maybeSingle()
   if (error || !data) {
     if (path) await client.storage.from(bucket).remove([path])

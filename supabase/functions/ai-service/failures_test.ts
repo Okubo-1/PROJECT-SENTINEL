@@ -188,8 +188,8 @@ Deno.test('AI handler fails safely and audits attributable failures', async () =
               role: scenario.denied ? 'Custom Role' : 'Field Worker',
             }])
           }
-          if (url.includes('/rest/v1/custom_roles')) {
-            return json([{ permissions: [] }])
+          if (url.includes('/rest/v1/rpc/can_use_ai_sessions')) {
+            return json(!scenario.denied)
           }
           if (url.includes('/rpc/begin_ai_session_turn')) {
             if (scenario.sessionDenied) return json({ code: '42501', message: 'private-session-details' }, 403)

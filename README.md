@@ -41,6 +41,125 @@ The activity-log hardening migration rejects organizationless activity rows for 
 
 Registration uses ISO-backed country data with a global region selector and dependent state/province options. Dashboard server state is managed through TanStack Query in [src/features/dashboard](src/features/dashboard), with organization and filter values included in query keys.
 
+## Anonymous reporting foundation
+
+The [reporter-link foundation](supabase/migrations/202611160002_anonymous_reporter_link_foundation.sql)
+creates a non-API schema, an encrypted reporter-link table and separate encryption and lookup
+secrets in Supabase Vault. Direct access is denied to API roles, including the service role.
+Database and infrastructure operators remain trusted. Do not delete, replace or rotate either
+Vault secret without a coordinated migration of existing ciphertext and lookup hashes.
+
+The [release migration](supabase/migrations/202611170003_release_anonymous_reporting.sql)
+enables anonymous reporting after the private submission, evidence and notification checks.
+The frontend must be deployed separately before users see the option.
+The [foundation test](supabase/tests/anonymous_reporter_link_foundation.sql) runs in a rollback
+transaction against a database where the migration has already been applied.
+
+The [identity guard migration](supabase/migrations/202611160003_anonymous_incident_identity_guards.sql)
+preserves identified reports while defining anonymous reporter, signature and evidence identity
+constraints. Before release, the corresponding
+[guard test](supabase/tests/anonymous_incident_identity_guards.sql) temporarily removed the gate
+inside a rollback transaction and took an exclusive lock on the incidents table.
+
+The [private resolver migration](supabase/migrations/202611160004_anonymous_reporter_resolution.sql)
+adds a current-user-only HMAC lookup and a private notification-recipient resolver. Neither is
+accessible directly to API roles. The [resolver test](supabase/tests/anonymous_reporter_resolution.sql) checks
+user and organization isolation in a rollback transaction and takes the same exclusive lock.
+
+The [private anonymous draft writer](supabase/migrations/202611160005_private_anonymous_draft.sql)
+creates identity-free drafts and their encrypted owner link atomically, supports owner-only edits
+and retry lookup, and ignores digital signatures. It is not exposed to API roles. Its [rollback test](supabase/tests/private_anonymous_draft.sql)
+checks owner isolation and does not leave fixtures behind.
+
+The [private anonymous submission migration](supabase/migrations/202611160008_private_anonymous_submission.sql)
+adds an owner-checked, idempotent internal draft-to-submission transition without an identifying
+activity entry or signature. It is not a client API and does not release anonymous reporting.
+The [submission rollback test](supabase/tests/private_anonymous_submission.sql) checks ownership,
+confirmation, identity removal, private-link resolution and retries.
+
+The [private anonymous report reader](supabase/migrations/202611160009_private_anonymous_report_reader.sql)
+uses the owner-only resolver and is not exposed to API roles. Its
+[rollback test](supabase/tests/private_anonymous_report_reader.sql) checks owner and organization
+isolation.
+
+The [My Reports and notifications migration](supabase/migrations/202611160013_my_reports_notifications.sql)
+connects owner-only report retrieval and a private, in-app incident notification feed. Assignment,
+investigation completion and closure events return only the incident ID and status to the reporter;
+the feed is displayed in My Reports and does not send email or push notifications. The
+[rollback test](supabase/tests/my_reports_notifications.sql) exercises owner and organization
+isolation, identified reports, event transitions and notification response fields. It temporarily
+removes the release gate and takes the same exclusive lock described above. Browser/API end-to-end
+verification is still required.
+
+Anonymous incident register exports explicitly use an anonymous reporter label, even if an
+upstream summary is malformed. Action-assignment notification failure logs contain only an event
+and processing stage, not user IDs or raw error text. These protections do not remove names or
+other identifying information entered in incident narratives, linked investigation/action text,
+or attachment contents, nor can they prevent identification by context or timing. Infrastructure
+request, database and hosting logs require separate operator review.
+
+The [anonymous draft API](supabase/migrations/202611160011_anonymous_draft_api.sql) wraps the
+private draft writer and owner-only reader. An opaque, account-bound token prevents another
+signed-in user from syncing a queued anonymous draft. Its
+[rollback test](supabase/tests/anonymous_draft_api.sql) checks the release gate, owner isolation,
+retry and identity-free responses. The client stores anonymous offline drafts separately from the
+existing identified submission queue and removes signature and unknown identity fields before
+storage and sync. After a reload, the report-type page can list and reopen drafts on the device
+after online owner verification. Offline-only reopening remains unavailable because ownership and
+company configuration cannot currently be verified offline. Server-backed drafts require online
+owner verification before reopening, including when a local copy has pending edits. Offline edits
+remain on the device until synchronization.
+
+The [anonymous draft submission endpoint](supabase/migrations/202611160012_anonymous_draft_submission.sql)
+uses the owner-checked private submission function. Its pre-release
+[rollback test](supabase/tests/anonymous_draft_submit_api.sql) checks the gate,
+owner isolation, identity-free response and idempotent submission.
+
+The [anonymous submission and evidence migration](supabase/migrations/202611160010_anonymous_submission_evidence.sql)
+adds a gated submission RPC and anonymous evidence storage protections. The
+[private bucket migration](supabase/migrations/202611170001_anonymous_evidence_bucket.sql) isolates
+anonymous evidence from the existing identified-evidence bucket. The sanitizer function authorizes
+the caller, stores evidence using the service role, and issues 60-second signed URLs only after a
+separate access check. Paths are opaque; filenames are generic and uploader and storage-owner IDs
+are absent. The
+[rollback test](supabase/tests/anonymous_submission_evidence.sql) checks database and authenticated
+role responses, storage-policy isolation and identified evidence compatibility. A live synthetic
+upload and signed-URL round trip was also verified. The
+[incident service test](supabase/tests/anonymous_incident_service_test.ts) checks client-side
+submission, upload and download behavior with mocked API responses.
+
+The [anonymous evidence sanitizer](supabase/functions/sanitize-anonymous-evidence/sanitize.ts)
+re-encodes supported JPEG and static PNG images without source metadata and converts supported
+ASCII plain-text files to a newly generated PDF. JPEG orientation is preserved. Processing is
+limited to files up to 8 MB and images up to 12 megapixels; formats that cannot be safely
+converted, including PDF, Word, Excel, video, animated PNG and unsupported or oversized images,
+are stored unchanged and the uploader is warned that they may identify them. If the function is
+unavailable, the upload fails rather than falling back to direct storage. The sanitizer does not
+remove names or faces from file content. Its [tests](supabase/functions/sanitize-anonymous-evidence/sanitize_test.ts)
+cover supported and unsupported input.
+
+The temporary [test-gate migration](supabase/migrations/202611170002_anonymous_test_gate.sql)
+allows only explicitly allowlisted accounts in one hard-coded synthetic test organization. The
+allowlist is private and empty after testing; organization administrators and API roles cannot modify
+it. The release migration disables that exception with an empty allowlist. The
+[release rollback](supabase/rollback/202611170003_release_anonymous_reporting.sql) blocks new
+anonymous reports without deleting existing ones; anonymous updates are also blocked while active.
+
+The [draft total function](supabase/migrations/202611160006_incident_draft_aggregate.sql)
+returns one organization-wide count without accepting filters or returning draft rows. The
+[permission migration](supabase/migrations/202611160007_restrict_draft_aggregate.sql) restricts
+it to Executive Analytics users. The [aggregate test](supabase/tests/incident_draft_aggregate.sql)
+checks authorization, tenant isolation, legacy and anonymous drafts, and submitted and deleted
+records in a rollback transaction. The local Executive Analytics and shared AI retrieval code
+exclude draft details. Both Edge Functions have been deployed; the Drafts card displays the
+organization-wide open-draft total independently of dashboard filters. Older deployed endpoints
+without the aggregate scope marker display Unavailable rather than a misleading filtered count.
+The shared retrieval also replaces anonymous incident titles and linked action, investigation,
+finding, cause and closure narratives before constructing analytics or AI context. This prevents
+those stored narratives from being echoed through these services; it cannot guarantee that a
+generative model will never repeat personal information supplied independently in a prompt or
+authorized knowledge document.
+
 ## Incident closure authorization
 
 Apply [the incident closure migration](supabase/migrations/202610060001_incident_closure_delegation.sql)
@@ -1342,15 +1461,17 @@ Submission:
 
 ### Evidence storage
 
-Evidence uses the private `incident-evidence` bucket. Supported files include common images, PDF, Word, spreadsheet, and plain-text evidence, with a 10 MB limit.
+Identified evidence uses the private `incident-evidence` bucket. Anonymous evidence uses the separate
+private `anonymous-incident-evidence` bucket and the server-authorized flow described above.
 
-Storage paths use:
+Identified storage paths use:
 
 ```text
 organization_id/incident_id/uploader_id/file_name
 ```
 
-The application never exposes public evidence URLs. Downloads use authenticated Supabase Storage access. Upload, download, and removal events are recorded in `activity_logs`.
+The application never exposes public evidence URLs. Identified downloads use authenticated Supabase
+Storage access, and identified upload, download, and removal events are recorded in `activity_logs`.
 
 ### Incident RLS and RBAC
 

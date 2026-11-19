@@ -14,6 +14,11 @@ entrypoint = "./functions/knowledge-extraction/index.ts"
 enabled = true
 verify_jwt = true
 
+[functions.sanitize-anonymous-evidence]
+enabled = true
+verify_jwt = true
+import_map = "./functions/sanitize-anonymous-evidence/deno.json"
+
 [functions.legal-compliance-expiry-notifications]
 enabled = true
 verify_jwt = true

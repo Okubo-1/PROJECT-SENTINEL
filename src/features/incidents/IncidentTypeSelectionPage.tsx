@@ -1,13 +1,16 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { SupabaseClient } from '@supabase/supabase-js'
 
-import { Badge, Button, Card, DetailList, EmptyState, Icon, PageHeader, Skeleton, buttonVariants } from '../../components/ui'
+import { Alert, Badge, Button, Card, DetailList, EmptyState, Icon, PageHeader, Skeleton, buttonVariants } from '../../components/ui'
 import type { IconName } from '../../lib/icons'
 import type { Role } from '../../types'
 import { companySettingsEventMatchesOrganization, companySettingsUpdatedEvent } from '../../lib/companySettingsSync'
 import { incidentReportTypes, type IncidentReportType } from './incidentTypes'
 import { IncidentReportForm } from './IncidentReportForm'
 import { useIncident, useIncidentOrganization } from './useIncidentData'
+import { getOfflineAnonymousDraft, listOfflineAnonymousDrafts } from './anonymousDraftQueue'
+import type { AnonymousDraftQueueItem } from './anonymousDraftQueue'
+import { getAnonymousDraftOwnerToken, getIncident } from './incidentService'
 
 const reportTypeDetails: Record<IncidentReportType, { label: string; description: string; icon: IconName }> = {
   incident: {
@@ -63,6 +66,24 @@ export function IncidentTypeSelectionPage({ role, supabase, draftId, reportTypes
   const [isFormOpen, setIsFormOpen] = useState(false)
   const draft = useIncident(supabase, draftId || null)
   const [configuredCategories, setConfiguredCategories] = useState<string[]>([])
+  const [offlineDrafts, setOfflineDrafts] = useState<AnonymousDraftQueueItem[]>([])
+  const [selectedOfflineDraft, setSelectedOfflineDraft] = useState<AnonymousDraftQueueItem | null>(null)
+  const [offlineError, setOfflineError] = useState('')
+
+  useEffect(() => {
+    if (!organization.data?.userId || draftId) return
+    let active = true
+    const load = () => {
+      void listOfflineAnonymousDrafts(supabase).then((drafts) => {
+        if (active) { setOfflineDrafts(drafts); setOfflineError('') }
+      }).catch(() => {
+        if (active) setOfflineError('Connect to the internet to verify ownership and recover anonymous drafts saved on this device.')
+      })
+    }
+    load()
+    window.addEventListener('online', load)
+    return () => { active = false; window.removeEventListener('online', load) }
+  }, [organization.data?.userId, draftId, supabase])
 
   useEffect(() => {
     if (!organization.data?.organizationId) return
@@ -126,6 +147,29 @@ export function IncidentTypeSelectionPage({ role, supabase, draftId, reportTypes
     setIsFormOpen(true)
   }
 
+  const resumeOfflineDraft = async (id: string) => {
+    if (!navigator.onLine) {
+      setOfflineError('Saved anonymous drafts can only be reopened online after verifying their owner.')
+      return
+    }
+    try {
+      const ownerToken = await getAnonymousDraftOwnerToken(supabase)
+      const item = await getOfflineAnonymousDraft(id, ownerToken)
+      if (item.serverDraftId) {
+        const serverDraft = await getIncident(supabase, item.serverDraftId)
+        if (!serverDraft.isAnonymous || serverDraft.status !== 'draft') throw new Error('Draft unavailable.')
+        if (!item.pending) {
+          window.location.assign(`#report-incident?draft=${item.serverDraftId}`)
+          return
+        }
+      }
+      setSelectedOfflineDraft(item)
+      setOfflineError('')
+    } catch {
+      setOfflineError('Unable to verify or reopen this draft. Connect to the internet and try again.')
+    }
+  }
+
   if (!allowedTypes.length) {
     return (
       <EmptyState
@@ -138,6 +182,16 @@ export function IncidentTypeSelectionPage({ role, supabase, draftId, reportTypes
   }
 
   if (draftId) {
+    if (!navigator.onLine) {
+      return (
+        <EmptyState
+          icon="incidents"
+          title="Draft unavailable offline"
+          description="Saved drafts can only be reopened online. Anonymous draft ownership must be verified before access."
+          action={<a href="#report-incident" className={buttonVariants({ variant: 'outline', size: 'sm' })}>Return to reporting</a>}
+        />
+      )
+    }
     if (draft.isLoading) {
       return (
         <div className="grid gap-5">
@@ -159,6 +213,10 @@ export function IncidentTypeSelectionPage({ role, supabase, draftId, reportTypes
     return <IncidentReportForm supabase={supabase} reportType={draft.data.reportType} draftId={draft.data.id} initialIncident={draft.data} />
   }
 
+  if (selectedOfflineDraft) {
+    return <IncidentReportForm supabase={supabase} reportType={selectedOfflineDraft.input.reportType} offlineDraft={selectedOfflineDraft} />
+  }
+
   if (isFormOpen && selectedType) {
     return (
       <IncidentReportForm
@@ -178,9 +236,25 @@ export function IncidentTypeSelectionPage({ role, supabase, draftId, reportTypes
       <PageHeader
         eyebrow="Report incident"
         title="What would you like to report?"
-        description="Select the report type or a quick field event. Each selection pre-fills the report and can be edited on the following stages."
+        description={<><span className="block text-foreground">Reporting helps us fix problems and keep everyone safe. This is not about blame.</span><span className="block">Select the report type or a quick field event. Each selection pre-fills the report.</span></>}
         actions={<a href="#my-reports" className={buttonVariants({ variant: 'outline', size: 'sm' })}>My reports</a>}
       />
+
+      {offlineError && <Alert tone="danger">{offlineError}</Alert>}
+      {offlineDrafts.length > 0 && (
+        <Card className="p-5 shadow-none">
+          <h2 className="font-display text-base font-semibold">Anonymous drafts on this device</h2>
+          <p className="mt-1 text-sm text-muted">Only drafts belonging to your verified account are shown.</p>
+          <div className="mt-3 grid gap-2">
+            {offlineDrafts.map((item) => (
+              <div key={item.id} className="flex items-center justify-between gap-3">
+                <span className="text-sm">{item.input.title || 'Untitled draft'} · {item.pending ? 'Pending sync' : 'Synced'}</span>
+                <Button type="button" variant="outline" size="sm" onClick={() => void resumeOfflineDraft(item.id)}>Resume</Button>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
 
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_320px]">
         <div className="grid gap-5">
@@ -215,7 +289,7 @@ export function IncidentTypeSelectionPage({ role, supabase, draftId, reportTypes
             <Card className="p-5 shadow-none">
               <div className="grid gap-0.5">
                 <h2 className="font-display text-base font-semibold text-foreground">Quick classifications</h2>
-                <p className="text-sm text-muted">Optional. Selecting one pre-fills the incident title and category.</p>
+                <p className="text-sm text-muted">Optional. Selecting one pre-fills the incident category.</p>
               </div>
               <div className="mt-4 flex flex-wrap gap-2">
                 {quickIncidentOptions.map((option) => {

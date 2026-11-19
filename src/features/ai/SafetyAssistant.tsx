@@ -40,10 +40,8 @@ export function SafetyAssistant({ client, scope, snapshot, canViewKnowledge = fa
   useEffect(() => {
     void conversation.load()
     const refresh = () => { void conversation.load() }
-    window.addEventListener('focus', refresh)
     window.addEventListener('incident-records-updated', refresh)
     return () => {
-      window.removeEventListener('focus', refresh)
       window.removeEventListener('incident-records-updated', refresh)
       conversation.dispose()
       queryClient.removeQueries({ queryKey: ['ai-conversations', scope.userId, scope.organizationId] })

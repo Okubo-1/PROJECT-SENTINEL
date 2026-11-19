@@ -70,8 +70,8 @@ async function run(scenario: Scenario, extra: Record<string, unknown> = {}) {
       }
       if (name === 'user') return json({ id: user })
       if (name === 'profiles') return json({ id: user, organization_id: org, account_status: 'active' })
-      if (name === 'memberships') return json({ user_id: user, organization_id: org, role: scenario === 'denied_role' ? 'Denied custom role' : 'Super Administrator' })
-      if (name === 'custom_roles') return json({ permissions: [] })
+      if (name === 'memberships') return json({ user_id: user, organization_id: org, role: scenario === 'denied_role' ? 'Field Worker' : 'Super Administrator' })
+      if (name === 'can_use_ai_sessions') return json(scenario !== 'denied_role')
       throw new Error(`Unexpected endpoint ${name}`)
     }),
   }

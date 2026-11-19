@@ -3,6 +3,8 @@ import { resolveSafetyScope, retrieveSafetyDataset } from '../_shared/safetyInte
 import { asOf, assert, dataset, equal, id, incident, org, site, user } from './fixtures_test.ts'
 import { handleSafetyRequest, type SafetyRuntime } from './handler.ts'
 import { safetyResponseSchema } from '../_shared/safetyIntelligenceContracts.ts'
+import { calculateSafetySnapshot } from '../_shared/safetyIntelligenceCalculations.ts'
+import { buildCopilotGrounding } from '../_shared/safetyCopilotGrounding.ts'
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
@@ -19,6 +21,8 @@ type Scenario = {
   foreignRow?: boolean;
   customPermissions?: string[];
   organizationPermission?: boolean;
+  draftCountFailure?: boolean;
+  omitAnonymityFlag?: boolean;
 }
 function fixtureFetch(data = dataset(), scenario: Scenario = {}, seen: URL[] = []): typeof fetch {
   const tenant = scenario.organizationId ?? org
@@ -36,9 +40,12 @@ function fixtureFetch(data = dataset(), scenario: Scenario = {}, seen: URL[] = [
     })
     if (table === 'custom_roles') return json({ permissions: scenario.denyPermission ? [] : scenario.customPermissions ?? [] })
     if (table === 'can_close_incidents') return json(scenario.delegated ?? false)
+    if (table === 'get_incident_draft_total') return scenario.draftCountFailure
+      ? json({ message: 'private-database-details' }, 500)
+      : json(data.rows.incidents.filter((row) => row.status === 'draft').length)
     if (url.pathname.endsWith('/rpc/has_org_permission')) {
       return json(scenario.organizationPermission
-        ?? (scenario.role === 'Super Administrator' || scenario.customPermissions?.includes('view_all_incidents') === true))
+        ?? ((scenario.role ?? 'Super Administrator') === 'Super Administrator' || scenario.customPermissions?.includes('view_all_incidents') === true))
     }
     if (table === 'company_settings') {
       assert(url.searchParams.get('organization_id') === `eq.${tenant}`, 'Missing trusted settings tenant predicate')
@@ -54,11 +61,14 @@ function fixtureFetch(data = dataset(), scenario: Scenario = {}, seen: URL[] = [
     if (scenario.malformed) return json([{ id: 'not-a-uuid' }])
     const key = source === 'closures' ? 'incident_id' : 'id'
     const list: unknown[] = data.rows[source as keyof typeof data.rows]
+    if (source === 'incidents') assert(url.searchParams.get('status') === 'neq.draft', 'Drafts were not excluded at the database')
     const cursor = url.searchParams.get(key)?.replace('gt.', '')
     let records = list.map((row) => {
       const parsed = JSON.parse(JSON.stringify(row)) as Record<string, unknown>
+      if (source === 'incidents' && scenario.omitAnonymityFlag) delete parsed.is_anonymous
       return scenario.foreignRow ? { ...parsed, organization_id: id(999) } : parsed
-    }).filter((row) => !cursor || String(row[key]) > cursor)
+    }).filter((row) => (!cursor || String(row[key]) > cursor)
+      && (source !== 'incidents' || row.status !== 'draft'))
     records.sort((a, b) => String(a[key]).localeCompare(String(b[key])))
     return json(records.slice(0, Number(url.searchParams.get('limit'))))
   })
@@ -132,7 +142,7 @@ Deno.test('site filters narrow real visibility; child sources require both paren
     { id: id(500), organization_id: org, investigation_id: id(400), root_cause_statement: 'Visible recorded cause', cause_category: null },
     { id: id(501), organization_id: org, investigation_id: id(401), root_cause_statement: 'Hidden parent cause', cause_category: null },
   ]
-  const caller = client(fixtureFetch(data))
+  const caller = client(fixtureFetch(data, { role: 'Field Worker' }))
   const context = { organizationId: org, userId: user, role: 'Field Worker' }
   const result = await retrieveSafetyDataset(caller, context, { days: 90, siteId: site })
   equal(result.rows.incidents.length, 1)
@@ -140,10 +150,26 @@ Deno.test('site filters narrow real visibility; child sources require both paren
   equal(result.rows.causes.map((row) => row.root_cause_statement), ['Visible recorded cause'])
   assert(result.coverage.every((row) => row.access === 'caller_visible'), 'Personal reads mislabeled organization coverage')
   equal((await resolveSafetyScope(caller, context, { days: 90 })).visibility, 'personal')
-  equal((await resolveSafetyScope(client(fixtureFetch(data, { delegated: true })), context, { days: 90 })).visibility, 'organization')
+  equal((await resolveSafetyScope(client(fixtureFetch(data, { role: 'Field Worker', delegated: true })), context, { days: 90 })).visibility, 'organization')
 })
 
-Deno.test('visible drafts and linked actions are planning-only while ordinary snapshots exclude them', async () => {
+Deno.test('organization coverage follows database permissions and delegation instead of role names', async () => {
+  const data = dataset([incident(0)])
+  const context = { organizationId: org, userId: user, role: 'Custom analyst' }
+  for (const [permission, delegated, expected] of [
+    [false, false, 'personal'], [true, false, 'organization'], [false, true, 'organization'],
+  ] as const) {
+    const caller = client(fixtureFetch(data, { role: context.role, organizationPermission: permission, delegated }))
+    const scope = await resolveSafetyScope(caller, context, { days: 90 })
+    const result = await retrieveSafetyDataset(caller, context, { days: 90 })
+    equal(scope.visibility, expected)
+    equal(result.coverage.find((entry) => entry.source === 'incidents')?.access,
+      expected === 'organization' ? 'organization' : 'caller_visible')
+    equal(result.rows.incidents.map((row) => row.id), [incident(0).id])
+  }
+})
+
+Deno.test('draft details and linked actions are excluded from all analytics and planning data', async () => {
   const draft = incident(10, { status: 'draft', report_type: 'near_miss', site_id: id(55), severity: 'Critical Risk' })
   const submitted = incident(11, { site_id: site })
   const data = dataset([draft, submitted])
@@ -155,11 +181,110 @@ Deno.test('visible drafts and linked actions are planning-only while ordinary sn
   const result = await retrieveSafetyDataset(client(fixtureFetch(data)),
     { organizationId: org, userId: user, role: 'Super Administrator' }, { days: 90 })
   equal(result.rows.incidents.map((row) => row.id), [submitted.id])
-  equal(result.planningIncidents?.map((row) => row.id), [draft.id, submitted.id])
+  equal(result.planningIncidents?.map((row) => row.id), [submitted.id])
   equal(result.rows.actions.map((row) => row.title), ['Submitted-linked action'])
-  equal(result.planningActions?.map((row) => row.title), ['Draft-linked action', 'Submitted-linked action'])
-  assert(result.planningSites?.some((row) => row.id === id(55)), 'Draft-visible site was omitted from planning lookup')
+  equal(result.planningActions?.map((row) => row.title), ['Submitted-linked action'])
+  assert(!result.planningSites?.some((row) => row.id === id(55)), 'Draft-only site leaked into planning lookup')
   assert(!result.rows.sites.some((row) => row.id === id(55)), 'Draft-only site leaked into standard snapshot rows')
+  assert(!JSON.stringify(result).includes(draft.id), 'Draft details leaked into analytics data')
+})
+
+Deno.test('anonymous incident narratives never enter analytics or AI grounding', async () => {
+  const marker = 'Private reporter identity marker'
+  const anonymous = incident(0, { is_anonymous: true, title: marker, digital_signature: marker, client_submission_id: marker })
+  const identified = incident(1, { title: 'Identified incident remains visible' })
+  const draft = incident(2, { status: 'draft', is_anonymous: true, title: marker })
+  const data = dataset([anonymous, identified, draft])
+  data.rows.actions.push({ id: id(300), organization_id: org, incident_id: anonymous.id, title: marker, status: 'open', due_date: null })
+  data.rows.investigations.push({ id: id(400), organization_id: org, incident_id: anonymous.id, status: 'completed', completed_at: null, findings_summary: marker })
+  data.rows.causes.push({ id: id(500), organization_id: org, investigation_id: id(400), root_cause_statement: marker, cause_category: marker })
+  data.rows.findings.push({ id: id(600), organization_id: org, investigation_id: id(400), description: marker, finding_type: marker })
+  data.rows.closures.push({ incident_id: anonymous.id, organization_id: org, closed_at: asOf.toISOString(), root_cause: marker, corrective_action: marker })
+  const caller = client(fixtureFetch(data))
+  const context = { organizationId: org, userId: user, role: 'Super Administrator' }
+  const filters = { days: 90 as const }
+  const retrieved = await retrieveSafetyDataset(caller, context, filters)
+  const scope = await resolveSafetyScope(caller, context, filters)
+  const snapshot = calculateSafetySnapshot(retrieved, scope, filters, asOf)
+  const grounding = await buildCopilotGrounding(retrieved, snapshot, 'Safety summary')
+  assert(!JSON.stringify(retrieved).includes(marker), 'Anonymous narrative leaked into retrieved data')
+  assert(!JSON.stringify(snapshot).includes(marker), 'Anonymous narrative leaked into analytics response')
+  assert(!grounding.serialized.includes(marker), 'Anonymous narrative leaked into model input')
+  assert(!grounding.serialized.includes(draft.id), 'Draft details leaked into model input')
+  assert(JSON.stringify(retrieved).includes(identified.title), 'Identified incident behavior changed')
+})
+
+Deno.test('snapshot HTTP response and application logs omit anonymous narrative markers', async () => {
+  const marker = 'Private reporter identity marker'
+  const anonymous = incident(0, { is_anonymous: true, title: marker })
+  const data = dataset([anonymous, incident(1, { title: 'Identified incident visible' })])
+  data.rows.actions.push({ id: id(300), organization_id: org, incident_id: anonymous.id, title: marker, status: 'open', due_date: null })
+  let authorization = ''
+  await client((_input, init) => {
+    authorization = new Headers(init?.headers).get('authorization') ?? ''
+    return Promise.resolve(json([]))
+  }).from('test').select('id')
+  const logs: unknown[] = []
+  const originalError = console.error
+  const originalLog = console.log
+  console.error = (...args: unknown[]) => logs.push(args)
+  console.log = (...args: unknown[]) => logs.push(args)
+  try {
+    const response = await handleSafetyRequest(new Request('https://test.invalid', {
+      method: 'POST', headers: { Authorization: authorization }, body: '{}',
+    }), {
+      env: (name) => name === 'SUPABASE_URL' ? 'https://intelligence-test.invalid' : 'test-anon',
+      now: () => asOf, fetch: fixtureFetch(data),
+    })
+    equal(response.status, 200)
+    const text = await response.text()
+    assert(!text.includes(marker), 'Anonymous narrative leaked in HTTP response')
+    assert(!JSON.stringify(logs).includes(marker), 'Anonymous narrative leaked in application logs')
+    safetyResponseSchema.parse(JSON.parse(text))
+  } finally {
+    console.error = originalError
+    console.log = originalLog
+  }
+})
+
+Deno.test('executive draft total is unfiltered and failed aggregate reads fail closed', async () => {
+  const draft = incident(10, { status: 'draft', title: 'Private draft title', site_id: id(55) })
+  const data = dataset([draft, incident(11)])
+  let authorization = ''
+  await client((_input, init) => {
+    authorization = new Headers(init?.headers).get('authorization') ?? ''
+    return Promise.resolve(json([]))
+  }).from('test').select('id')
+  const testRequest = (url: string, init: RequestInit) => {
+    const request = new Request(url, init)
+    request.headers.set('Authorization', authorization)
+    return request
+  }
+  for (const filters of [{ days: 30, siteId: site }, { days: 90, department: 'No matching department' }]) {
+    const seen: URL[] = []
+    const runtime: SafetyRuntime = {
+      env: (name) => name === 'SUPABASE_URL' ? 'https://intelligence-test.invalid' : 'test-anon',
+      now: () => asOf, fetch: fixtureFetch(data, {}, seen),
+    }
+    const response = await handleSafetyRequest(testRequest('https://test.invalid', {
+      method: 'POST', headers: { Authorization: '******' }, body: JSON.stringify(filters),
+    }), runtime)
+    equal(response.status, 200)
+    const text = await response.text()
+    assert(!text.includes(draft.id) && !text.includes(draft.title), 'Draft details leaked in response')
+    const result = safetyResponseSchema.parse(JSON.parse(text))
+    assert(result.ok, 'Expected successful snapshot')
+    equal([result.snapshot.metrics.incidentCounts?.drafts, result.snapshot.metrics.incidentCounts?.draftScope], [1, 'organization_open'])
+    assert(seen.some((url) => url.pathname.endsWith('/rpc/get_incident_draft_total')), 'Aggregate RPC was not called')
+  }
+  const failed = await handleSafetyRequest(testRequest('https://test.invalid', {
+    method: 'POST', headers: { Authorization: '******' }, body: '{}',
+  }), {
+    env: (name) => name === 'SUPABASE_URL' ? 'https://intelligence-test.invalid' : 'test-anon',
+    now: () => asOf, fetch: fixtureFetch(data, { draftCountFailure: true }),
+  })
+  equal(failed.status, 503)
+  assert(!(await failed.text()).includes('private-database-details'), 'Aggregate error leaked internals')
 })
 
 Deno.test('confirmed synthetic provenance excludes incident and linked evidence without filtering ordinary submission IDs', async () => {
@@ -198,6 +323,7 @@ Deno.test('authenticated snapshot endpoint rejects overrides, auth/role failures
     { name: 'malformed data', status: 503, body: {}, scenario: { malformed: true } },
     { name: 'database failure', status: 503, body: {}, scenario: { failedRead: true } },
     { name: 'foreign tenant data', status: 503, body: {}, scenario: { foreignRow: true } },
+    { name: 'missing anonymity flag', status: 503, body: {}, scenario: { omitAnonymityFlag: true } },
   ] satisfies Array<{ name: string; status: number; body: unknown; scenario: Scenario }>
   for (const item of scenarios) {
     const seen: URL[] = []

@@ -153,8 +153,19 @@ Deno.test('Grounded handler enforces caller retrieval, session/audit linkage and
   for (const scenario of ['success', 'continuation', 'changed', 'other_session', 'session_denied', 'denied',
     'foreign_org', 'foreign_user', 'other_site', 'hidden_parent', 'read_failure', 'proof_failure', 'audit_failure',
     'forged_citation', 'malformed_answer', 'provider_failure', 'timeout', 'quota', 'quota_unavailable',
-    'delivery_revoked', 'delivery_failure', 'delivery_audit_failure', 'knowledge', 'knowledge_denied', 'knowledge_forged'] as const) {
+    'delivery_revoked', 'delivery_failure', 'delivery_audit_failure', 'knowledge', 'knowledge_denied', 'knowledge_forged',
+    'private_draft', 'anonymous_privacy'] as const) {
     const data = records()
+    if (scenario === 'private_draft') data.rows.incidents.push(incident(99, { status: 'draft', title: 'Private draft title' }))
+    if (scenario === 'anonymous_privacy') {
+      data.rows.incidents[0] = incident(0, {
+        is_anonymous: true, title: 'PRIVATE_REPORTER_NAME', digital_signature: 'PRIVATE_SIGNATURE',
+        client_submission_id: 'PRIVATE_REPORTER_SUBMISSION',
+      })
+      data.rows.incidents.push(incident(99, { status: 'draft', title: 'PRIVATE_DRAFT_TITLE' }))
+      data.rows.actions.push({ id: id(701), organization_id: org, incident_id: data.rows.incidents[0].id,
+        title: 'PRIVATE_UPLOADER_NAME', status: 'open', due_date: null })
+    }
     if (scenario === 'other_site') data.rows.incidents[0].site_id = id(999)
     if (scenario === 'hidden_parent') data.rows.actions.push({
       id: id(700), organization_id: org, incident_id: id(999), title: 'Hidden parent action', status: 'open', due_date: null,
@@ -176,6 +187,12 @@ Deno.test('Grounded handler enforces caller retrieval, session/audit linkage and
         const headers = new Headers(init?.headers)
         const body = init?.body ? JSON.parse(String(init.body)) : undefined
         if (url.hostname === 'api.openai.com' && url.pathname.endsWith('/embeddings')) {
+          if (scenario === 'anonymous_privacy') {
+            const payload = JSON.stringify(body)
+            for (const secret of [user, 'PRIVATE_REPORTER_NAME', 'PRIVATE_SIGNATURE', 'PRIVATE_REPORTER_SUBMISSION', 'PRIVATE_DRAFT_TITLE', 'PRIVATE_UPLOADER_NAME']) {
+              assert(!payload.includes(secret), 'Identity or draft content entered embedding payload')
+            }
+          }
           return json({ data: [{ index: 0, embedding: Array(1536).fill(0.01) }] })
         }
         if (url.hostname === 'api.openai.com') {
@@ -184,16 +201,26 @@ Deno.test('Grounded handler enforces caller retrieval, session/audit linkage and
           equal(body.text.format.strict, true)
           assert(!body.tools, 'Write/model SQL tools supplied')
           const context = JSON.parse(body.input[0].content).authorized_operational_context
+          if (scenario === 'anonymous_privacy') {
+            const payload = JSON.stringify(body)
+            for (const secret of [user, 'PRIVATE_REPORTER_NAME', 'PRIVATE_SIGNATURE', 'PRIVATE_REPORTER_SUBMISSION', 'PRIVATE_DRAFT_TITLE', 'PRIVATE_UPLOADER_NAME']) {
+              assert(!payload.includes(secret), 'Identity or draft content entered provider payload')
+            }
+            assert(context.evidence.some((item: { id: string }) => item.id === data.rows.incidents[0].id),
+              'Anonymous incident was not exercised in provider context')
+          }
           const knowledgeInput = body.input.find((item: { content: string }) => item.content.includes('authorized_knowledge_context'))
           equal(Boolean(knowledgeInput), scenario !== 'knowledge_denied')
           if (scenario === 'knowledge') assert(knowledgeInput.content.includes(knowledgeRow.content), 'Authorized knowledge excerpt missing')
           if (scenario === 'knowledge_denied') assert(!JSON.stringify(body.input).includes(knowledgeRow.content), 'Denied knowledge leaked')
           equal(context.scope.organizationId, org)
+          assert(!('userId' in context.scope), 'Provider received requester ID')
           assert(body.input.reduce((sum: number, item: { content: string }) => sum + item.content.length, 0) <= 24_000, 'Provider context unbounded')
           const containsHistory = body.input.some((item: { content: string }) => item.content === 'Earlier verified answer')
           equal(containsHistory, scenario === 'continuation')
           if (scenario === 'other_site') assert(context.evidence.every((item: { id: string }) => item.id !== data.rows.incidents[0].id), 'Other-site incident leaked')
           if (scenario === 'hidden_parent') assert(!JSON.stringify(context).includes('Hidden parent action'), 'Hidden-parent action leaked')
+          if (scenario === 'private_draft') assert(!JSON.stringify(context).includes('Private draft title'), 'Draft entered model context')
           if (scenario === 'provider_failure') return json({}, 500)
           if (scenario === 'timeout') throw new DOMException('Private details', 'TimeoutError')
           return json({ status: 'completed', output: [{ type: 'message', status: 'completed', content: [{ type: 'output_text', text: scenario === 'malformed_answer' ? 'bad JSON' : JSON.stringify({
@@ -232,7 +259,7 @@ Deno.test('Grounded handler enforces caller retrieval, session/audit linkage and
           user_id: scenario === 'foreign_user' ? id(999) : user, organization_id: scenario === 'foreign_org' ? id(999) : org,
           role: scenario === 'denied' ? 'Denied custom role' : 'Super Administrator',
         })
-        if (table === 'custom_roles') return json({ permissions: [] })
+        if (table === 'can_use_ai_sessions') return json(scenario !== 'denied')
         if (table === 'company_settings') {
           equal(url.searchParams.get('organization_id'), `eq.${org}`)
           return json(data.companySettings)
@@ -243,6 +270,7 @@ Deno.test('Grounded handler enforces caller retrieval, session/audit linkage and
           return json(scenario === 'knowledge' || scenario === 'knowledge_forged' ? [knowledgeRow] : [])
         }
         if (table === 'can_close_incidents') return json(false)
+        if (table === 'has_org_permission') return json(true)
         if (table === 'can_read_ai_session') {
           equal(body.target_session, sessionId)
           return scenario === 'delivery_failure' ? json({}, 500) : json(scenario !== 'delivery_revoked')
@@ -260,7 +288,9 @@ Deno.test('Grounded handler enforces caller retrieval, session/audit linkage and
         assert(source, `Unexpected endpoint ${table}`)
         equal(init?.method ?? 'GET', 'GET')
         equal(url.searchParams.get('organization_id'), `eq.${org}`)
-        return scenario === 'read_failure' ? json({}, 500) : json(data.rows[source])
+        if (source === 'incidents') equal(url.searchParams.get('status'), 'neq.draft')
+        return scenario === 'read_failure' ? json({}, 500)
+          : json(source === 'incidents' ? data.rows.incidents.filter((row) => row.status !== 'draft') : data.rows[source])
       }),
     }
     if (['continuation', 'changed', 'proof_failure'].includes(scenario)) {
@@ -290,7 +320,7 @@ Deno.test('Grounded handler enforces caller retrieval, session/audit linkage and
       method: 'POST', headers: { Authorization: 'Bearer test-caller', 'Content-Type': 'application/json' },
       body: JSON.stringify({ feature: 'safety_copilot', sessionId, prompt: 'Risk', ...(scenario === 'other_site' ? { siteId: site } : {}) }),
     }), runtime)
-    const success = ['success', 'continuation', 'changed', 'other_site', 'hidden_parent', 'knowledge', 'knowledge_denied'].includes(scenario)
+    const success = ['success', 'continuation', 'changed', 'other_site', 'hidden_parent', 'knowledge', 'knowledge_denied', 'private_draft', 'anonymous_privacy'].includes(scenario)
     const generated = success || ['delivery_revoked', 'delivery_failure', 'delivery_audit_failure'].includes(scenario)
     equal(response.status, success ? 200 : ['foreign_org', 'foreign_user', 'session_denied', 'other_session', 'denied'].includes(scenario) ? 403
       : scenario === 'delivery_revoked' ? 403 : scenario === 'quota' ? 429 : scenario === 'timeout' ? 504 : ['forged_citation', 'knowledge_forged', 'malformed_answer', 'provider_failure'].includes(scenario) ? 502 : 503)
@@ -337,7 +367,7 @@ Deno.test('Grounded handler enforces caller retrieval, session/audit linkage and
       equal(Object.keys(savedAccess.access_sources).length, scenario === 'knowledge' ? 9 : 8)
       if (scenario === 'knowledge') equal(savedAccess.access_sources.knowledge, [knowledgeRow.version_id])
       equal(savedAccess.access_sources.incidents, data.rows.incidents
-        .filter((row) => scenario !== 'other_site' || row.site_id === site).map((row) => row.id))
+        .filter((row) => row.status !== 'draft' && (scenario !== 'other_site' || row.site_id === site)).map((row) => row.id))
       assert(!('access_sources' in completion.response_metadata), 'Private access footprint leaked into audit')
     }
   }

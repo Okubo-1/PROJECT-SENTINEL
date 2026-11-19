@@ -43,9 +43,11 @@ export function IncidentLinkedActionsCard({ className, actions, loading, error, 
                     { label: 'Due', value: formatDate(action.due_at) },
                   ]}
                 />
-                <a href={`#assigned-actions?action=${action.id}`} className={buttonVariants({ variant: 'outline', size: 'sm' })}>
-                  View action
-                </a>
+                {action.assignee_id && (
+                  <a href={`#assigned-actions?action=${action.id}`} className={buttonVariants({ variant: 'outline', size: 'sm' })}>
+                    View action
+                  </a>
+                )}
               </div>
             )
           })}

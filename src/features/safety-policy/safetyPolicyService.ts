@@ -49,6 +49,7 @@ export interface SafetyPolicyDraft {
 const frequencies = new Set<SafetyPolicyFrequency>(['every_login', 'first_login', 'interval_days', 'weekly'])
 const SAFETY_POLICY_REQUEST_TIMEOUT_MS = 12_000
 
+<<<<<<< HEAD
 interface SafetyPolicyRpcError {
   code?: string
   message?: string
@@ -108,6 +109,12 @@ function acknowledgementErrorMessage(error: SafetyPolicyRpcError): string {
       return 'Your sign-in session could not be verified. Sign out and sign in again.'
     default:
       return 'We could not save your acknowledgement. Please retry.'
+=======
+class SafetyPolicyVerificationError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'SafetyPolicyVerificationError'
+>>>>>>> b723469ffd2d5f721d0865f0a9e5d43cb5661c0a
   }
 }
 
@@ -118,7 +125,7 @@ async function withSafetyPolicyTimeout<T>(request: PromiseLike<T>): Promise<T> {
       Promise.resolve(request),
       new Promise<never>((_, reject) => {
         timeoutId = window.setTimeout(
-          () => reject(new Error('Policy verification is taking longer than expected. Please retry.')),
+          () => reject(new SafetyPolicyVerificationError('Policy verification is taking longer than expected. Please retry.')),
           SAFETY_POLICY_REQUEST_TIMEOUT_MS,
         )
       }),
@@ -126,6 +133,32 @@ async function withSafetyPolicyTimeout<T>(request: PromiseLike<T>): Promise<T> {
   } finally {
     window.clearTimeout(timeoutId)
   }
+}
+
+function verificationError(error: { code?: string; message?: string }): SafetyPolicyVerificationError {
+  if (error.code === 'PGRST202' || error.code === '42883' || error.code === '42P01') {
+    return new SafetyPolicyVerificationError(
+      'Safety Policy verification is unavailable because the required database function or schema is missing. Contact your administrator to apply the Safety Policy database migrations.',
+    )
+  }
+  if (error.code === '42501' && error.message?.toLowerCase().includes('active organization membership')) {
+    return new SafetyPolicyVerificationError(
+      'Your active organization membership could not be verified. Ask your administrator to check your profile and organization membership.',
+    )
+  }
+  if (error.code === '42501') {
+    return new SafetyPolicyVerificationError(
+      'Your account does not have permission to verify the company Safety Policy. Contact your administrator.',
+    )
+  }
+  if (error.code === '28000' || error.code === 'PGRST301') {
+    return new SafetyPolicyVerificationError(
+      'Your authenticated session could not be verified. Sign out and sign in again, then retry.',
+    )
+  }
+  return new SafetyPolicyVerificationError(
+    `The database could not verify your company Safety Policy${error.code ? ` (${error.code})` : ''}. Please retry or contact your administrator.`,
+  )
 }
 
 function objectValue(value: unknown): Record<string, unknown> {
@@ -173,6 +206,7 @@ export async function getSafetyPolicyStatus(client: SupabaseClient): Promise<Saf
   try {
     response = await withSafetyPolicyTimeout(client.rpc('get_safety_policy_status'))
   } catch (caught) {
+<<<<<<< HEAD
     logSafetyPolicyFailure('Status request', caught instanceof Error ? caught : new Error('Unknown request failure'))
     if (caught instanceof Error && caught.message.includes('longer than expected')) throw caught
     throw new Error('We could not verify your company safety policy. Check your connection and retry.')
@@ -182,6 +216,13 @@ export async function getSafetyPolicyStatus(client: SupabaseClient): Promise<Saf
     logSafetyPolicyFailure('Status RPC', error)
     throw new Error(verificationErrorMessage(error))
   }
+=======
+    if (caught instanceof SafetyPolicyVerificationError) throw caught
+    throw new SafetyPolicyVerificationError('A network error interrupted Safety Policy verification. Check your connection and retry.')
+  }
+  const { data, error } = response
+  if (error) throw verificationError(error)
+>>>>>>> b723469ffd2d5f721d0865f0a9e5d43cb5661c0a
 
   try {
     const result = objectValue(data)
@@ -218,11 +259,18 @@ export async function getSafetyPolicyStatus(client: SupabaseClient): Promise<Saf
       },
     }
   } catch (caught) {
+<<<<<<< HEAD
     logSafetyPolicyFailure(
       'Status response validation',
       caught instanceof Error ? caught : new Error('Invalid response'),
     )
     throw new Error('The Safety Policy service returned an invalid response. Contact your administrator.')
+=======
+    if (caught instanceof SafetyPolicyVerificationError) throw caught
+    throw new SafetyPolicyVerificationError(
+      'The Safety Policy service returned an incomplete or invalid response. Contact your administrator.',
+    )
+>>>>>>> b723469ffd2d5f721d0865f0a9e5d43cb5661c0a
   }
 }
 

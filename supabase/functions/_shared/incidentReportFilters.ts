@@ -4,10 +4,10 @@ const severityAliases: Record<string, 'low' | 'medium' | 'high' | 'critical'> = 
   high: 'high', highrisk: 'high', highseverity: 'high',
   critical: 'critical', criticalrisk: 'critical', criticalseverity: 'critical',
 }
-const incidentStatuses = ['draft', 'submitted', 'under_review', 'investigation', 'corrective_action', 'pending_verification', 'closed'] as const
+const incidentStatuses = ['draft', 'submitted', 'under_review', 'investigation', 'corrective_action', 'pending_verification', 'open', 'closed'] as const
 const incidentStatusAliases: Record<string, (typeof incidentStatuses)[number]> = {
   draft: 'draft', draftreport: 'draft', savedraft: 'draft', submitted: 'submitted', underreview: 'under_review', investigation: 'investigation',
-  correctiveaction: 'corrective_action', pendingverification: 'pending_verification', closed: 'closed', resolved: 'closed',
+  correctiveaction: 'corrective_action', pendingverification: 'pending_verification', open: 'open', closed: 'closed', resolved: 'closed',
 }
 
 function normalizeLabel(value: unknown) {
@@ -15,7 +15,10 @@ function normalizeLabel(value: unknown) {
 }
 
 export function normalizeIncidentSeverity(value: unknown) {
-  return severityAliases[normalizeLabel(value)] ?? null
+  const normalized = normalizeLabel(value)
+  return Object.prototype.hasOwnProperty.call(severityAliases, normalized)
+    ? severityAliases[normalized]
+    : null
 }
 
 const severityRank = { low: 1, medium: 2, high: 3, critical: 4 } as const
@@ -24,10 +27,37 @@ const severityRank = { low: 1, medium: 2, high: 3, critical: 4 } as const
 // Executive Analytics and the dashboard risk calculations. Near misses carry
 // potential_severity, incidents carry severity; either can satisfy a filter.
 export function effectiveIncidentSeverity(actual: unknown, potential: unknown) {
-  const candidates = [normalizeIncidentSeverity(actual), normalizeIncidentSeverity(potential)]
-    .filter((value): value is keyof typeof severityRank => value !== null)
-  if (!candidates.length) return null
-  return candidates.sort((a, b) => severityRank[b] - severityRank[a])[0]
+  const supplied = [actual, potential].filter((value) => typeof value === 'string' && value.trim())
+  const candidates = supplied.map(normalizeIncidentSeverity)
+  if (!candidates.length || candidates.some((value) => value === null)) return null
+  const ranked = candidates.filter((value): value is keyof typeof severityRank => value !== null)
+  if (!ranked.length) return null
+  return ranked.sort((a, b) => severityRank[b] - severityRank[a])[0]
+}
+
+export type IncidentStatusCountRow = {
+  status: unknown
+  severity: unknown
+  potential_severity: unknown
+}
+
+export function calculateIncidentStatusCounts(rows: readonly IncidentStatusCountRow[]) {
+  const incidents = rows.filter((row) => !isDraftIncidentStatus(row.status))
+  const closed = incidents.filter((row) => isClosedIncidentStatus(row.status))
+  const open = incidents.filter((row) => isOpenIncidentStatus(row.status))
+  const isHighRisk = (row: IncidentStatusCountRow) => {
+    const severity = effectiveIncidentSeverity(row.severity, row.potential_severity)
+    return severity === 'high' || severity === 'critical'
+  }
+  const highRisk = incidents.filter(isHighRisk)
+  return {
+    total: incidents.length,
+    open: open.length,
+    closed: closed.length,
+    highRisk: highRisk.length,
+    openHighRisk: highRisk.filter((row) => isOpenIncidentStatus(row.status)).length,
+    closedHighRisk: highRisk.filter((row) => isClosedIncidentStatus(row.status)).length,
+  }
 }
 
 export function effectiveIncidentSeverityLabel(actual: unknown, potential: unknown) {

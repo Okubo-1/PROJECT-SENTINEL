@@ -1,7 +1,7 @@
 import { calculateSafetySnapshot, effectiveSafetySeverity } from '../_shared/safetyIntelligenceCalculations.ts'
 import { safetyFiltersSchema, safetyIncidentSchema, safetyResponseSchema, safetySnapshotSchema } from '../_shared/safetyIntelligenceContracts.ts'
 import {
-  incidentSeverityFilterPatterns, isActionDueNotPassed, isOpenIncidentStatus,
+  calculateIncidentStatusCounts, incidentSeverityFilterPatterns, isActionDueNotPassed, isOpenIncidentStatus,
   isUnfinishedCorrectiveActionStatus, normalizeIncidentReportType, normalizeIncidentSeverity, normalizeIncidentStatus,
 } from '../_shared/incidentReportFilters.ts'
 import { asOf, assert, dataset, equal, id, incident, org, scope, site } from './fixtures_test.ts'
@@ -15,16 +15,18 @@ Deno.test('older deployed snapshots without Drafts remain valid responses', () =
     'Legacy incidentCounts without drafts should remain response-compatible')
 })
 
-Deno.test('Drafts KPI counts authorized planning incidents excluded from operational rows', () => {
+Deno.test('Drafts KPI uses the organization total and excludes draft details from other counts', () => {
   const submitted = incident(0)
   const draft = incident(1, { status: 'draft' })
   const data = dataset([submitted])
   data.planningIncidents = [submitted, draft]
+  data.draftTotal = 7
 
   const result = snapshot(data)
-  equal(result.metrics.incidentCounts?.total, 2)
-  equal(result.metrics.incidentCounts?.open, 2)
-  equal(result.metrics.incidentCounts?.drafts, 1)
+  equal(result.metrics.incidentCounts?.total, 1)
+  equal(result.metrics.incidentCounts?.open, 1)
+  equal(result.metrics.incidentCounts?.drafts, 7)
+  assert(!JSON.stringify(result).includes(draft.id), 'Draft detail leaked in snapshot')
   equal(result.metrics.category.denominator, 1)
 })
 
@@ -114,11 +116,12 @@ Deno.test('KPI counts follow Incident Management occurrence-date windows for eve
       incident(3, { status: 'draft' }),
       incident(4, { reported_at: asOf.toISOString() }),
     ])
+    data.draftTotal = 1
     data.rows.closures.push({ incident_id: incident(0).id, organization_id: org,
       closed_at: '2024-01-01T12:00:00.000Z', root_cause: 'Recorded cause', corrective_action: 'Recorded action' })
     const all = calculateSafetySnapshot(data, scope, { days: 'all' }, asOf)
-    equal(all.metrics.incidentCounts?.total, 5)
-    equal(all.metrics.incidentCounts?.open, 4)
+    equal(all.metrics.incidentCounts?.total, 4)
+    equal(all.metrics.incidentCounts?.open, 3)
     equal(all.metrics.incidentCounts?.drafts, 1)
     equal(all.metrics.incidentCounts?.closed, 1)
     equal(all.metrics.incidentCounts?.nearMiss, 1)
@@ -132,9 +135,9 @@ Deno.test('KPI counts follow Incident Management occurrence-date windows for eve
     equal(all.windows.reporting.start, '2023-10-01T12:00:00.000Z')
     for (const days of [30, 90] as const) {
       const bounded = calculateSafetySnapshot(data, scope, { days }, asOf)
-      equal(bounded.metrics.incidentCounts?.total, 5)
+      equal(bounded.metrics.incidentCounts?.total, 1)
       equal(bounded.metrics.incidentCounts?.drafts, 1)
-      equal(bounded.metrics.incidentCounts?.nearMiss, 1)
+      equal(bounded.metrics.incidentCounts?.nearMiss, 0)
       equal(bounded.metrics.resolution.sampleSize, 0)
       equal(bounded.incidentTrend?.records.length, 1)
     }
@@ -152,6 +155,7 @@ Deno.test('trend uses independent reporting and actual closure cohorts without a
     incident(4, { reported_at: asOf.toISOString() }),
     incident(5, { reported_at: '2026-09-06T11:59:59.999Z' }),
   ])
+  data.draftTotal = 1
   data.rows.closures = [1, 2].map((n) => ({
     incident_id: incident(n).id, organization_id: org, closed_at: '2026-10-04T12:00:00.000Z',
     root_cause: 'Fixture cause', corrective_action: 'Fixture action',
@@ -162,9 +166,12 @@ Deno.test('trend uses independent reporting and actual closure cohorts without a
   equal(trend.records.map((row) => row.id), [incident(0).id, incident(1).id, incident(2).id])
   equal(trend.records[2].reportedAt, null)
   equal(trend.records[2].closedAt, '2026-10-04T12:00:00.000Z')
-  equal(trend.records[1].severity, null)
-  equal(result.metrics.incidentCounts?.total, 6)
-  equal(result.metrics.incidentCounts?.open, 4)
+  equal(trend.records[1].severity, 'High')
+  data.rows.incidents[1].potential_severity = null
+  equal(calculateSafetySnapshot(data, scope, { days: 30 }, asOf).incidentTrend?.records[1].severity, null)
+  data.rows.incidents[1].potential_severity = 'High'
+  equal(result.metrics.incidentCounts?.total, 2)
+  equal(result.metrics.incidentCounts?.open, 1)
   equal(result.metrics.incidentCounts?.drafts, 1)
   equal(result.metrics.incidentCounts?.nearMiss, 1)
   equal(trend.settings.categories, ['Equipment'])
@@ -230,18 +237,19 @@ Deno.test('incident counts use distinct IDs, normalized status and occurred_at w
     incident(7, { occurred_at: asOf.toISOString(), reported_at: asOf.toISOString() }),
   ])
   data.rows.incidents[6] = safetyIncidentSchema.parse({ ...data.rows.incidents[6], status: ' Draft Report ' })
+  data.draftTotal = 1
   data.rows.incidents.push(data.rows.incidents[0])
   equal(snapshot(data).metrics.incidentCounts, { state: 'available', reasons: [
     'Reports at or after the snapshot cutoff are excluded.',
-  ], total: 6, open: 5, closed: 1, drafts: 1, nearMiss: 1 })
+  ], total: 5, open: 4, closed: 1, drafts: 1, draftScope: 'organization_open', nearMiss: 1 })
   const allTime = calculateSafetySnapshot(data, scope, { days: 'all' }, asOf).metrics.incidentCounts!
-  equal([allTime.total, allTime.open, allTime.closed, allTime.drafts, allTime.nearMiss], [8, 7, 1, 1, 1])
+  equal([allTime.total, allTime.open, allTime.closed, allTime.drafts, allTime.nearMiss], [7, 6, 1, 1, 1])
   const ninetyDays = calculateSafetySnapshot(data, scope, { days: 90 }, asOf).metrics.incidentCounts!
-  equal([ninetyDays.total, ninetyDays.open, ninetyDays.closed, ninetyDays.drafts, ninetyDays.nearMiss], [6, 5, 1, 1, 1])
+  equal([ninetyDays.total, ninetyDays.open, ninetyDays.closed, ninetyDays.drafts, ninetyDays.nearMiss], [5, 4, 1, 1, 1])
   const shorter = calculateSafetySnapshot(data, scope, { days: 30 }, asOf)
   equal([shorter.metrics.incidentCounts?.total, shorter.metrics.incidentCounts?.open,
     shorter.metrics.incidentCounts?.closed, shorter.metrics.incidentCounts?.drafts,
-    shorter.metrics.incidentCounts?.nearMiss], [5, 4, 1, 1, 1])
+    shorter.metrics.incidentCounts?.nearMiss], [4, 3, 1, 1, 1])
   equal(snapshot().metrics.incidentCounts?.total, 0)
   data.rows.incidents.push(incident(8, { reported_at: null }))
   equal(snapshot(data).metrics.incidentCounts?.state, 'incomplete')
@@ -253,6 +261,38 @@ Deno.test('incident counts use distinct IDs, normalized status and occurred_at w
   assert(rejected, 'Foreign organization entered KPI calculations')
 })
 
+Deno.test('dashboard, executive analytics, and incident report status counts agree', () => {
+  const rows = [
+    incident(0, { status: 'submitted', severity: 'High' }),
+    incident(1, { status: 'pending_verification', severity: 'Critical' }),
+    incident(2, { status: 'closed', severity: 'High' }),
+    incident(3, { status: 'closed', severity: 'Low', potential_severity: 'Medium' }),
+    incident(4, { status: 'draft', severity: 'Critical' }),
+    incident(5, { status: 'submitted', severity: 'High', potential_severity: 'Unmapped severity' }),
+  ]
+  const dashboardCounts = calculateIncidentStatusCounts(rows)
+  const reportOpenCount = rows.filter((row) => isOpenIncidentStatus(row.status)).length
+  const reportClosedCount = rows.filter((row) => normalizeIncidentStatus(row.status) === 'closed').length
+  const data = dataset(rows)
+  data.draftTotal = 1
+  const executiveCounts = snapshot(data).metrics
+
+  equal(
+    [dashboardCounts.total, dashboardCounts.open, dashboardCounts.closed, dashboardCounts.highRisk,
+      dashboardCounts.closedHighRisk],
+    [5, 3, 2, 3, 1],
+  )
+  equal([reportOpenCount, reportClosedCount], [dashboardCounts.open, dashboardCounts.closed])
+  equal(
+    [executiveCounts.incidentCounts?.total, executiveCounts.incidentCounts?.open, executiveCounts.incidentCounts?.closed,
+      executiveCounts.highRisk.count, executiveCounts.highRisk.openCount, executiveCounts.highRisk.closedCount],
+    [dashboardCounts.total, dashboardCounts.open, dashboardCounts.closed, dashboardCounts.highRisk,
+      dashboardCounts.openHighRisk, dashboardCounts.closedHighRisk],
+  )
+  equal(executiveCounts.incidentCounts?.drafts, 1)
+  assert(!JSON.stringify(snapshot(data)).includes(rows[4].id), 'Executive Analytics exposed a draft incident detail')
+})
+
 Deno.test('outstanding action backlog uses distinct unfinished actions with authorized parents, not the KPI window', () => {
   const data = dataset([incident(0, { reported_at: '2025-01-01T00:00:00Z' })])
   const statuses = ['open', 'assigned', 'in_progress', 'pending_verification', 'verified', 'closed', 'rejected'] as const
@@ -260,11 +300,17 @@ Deno.test('outstanding action backlog uses distinct unfinished actions with auth
     id: id(300 + n), organization_id: org, incident_id: incident(0).id,
     title: 'Recorded action', status, due_date: null,
   }))
+  for (const [index, status] of statuses.entries()) {
+    const single = dataset(data.rows.incidents)
+    single.rows.actions = [data.rows.actions[index]]
+    equal(snapshot(single).metrics.outstandingActions?.count, index < 4 ? 1 : 0)
+    assert(single.rows.actions[0].status === status, 'Incorrect status fixture')
+  }
   data.rows.actions.push(data.rows.actions[0], {
     ...data.rows.actions[0], id: id(400), incident_id: id(999),
   })
-  equal(snapshot(data).metrics.outstandingActions, { state: 'available', reasons: [], count: 5 })
-  equal(calculateSafetySnapshot(data, scope, { days: 30 }, asOf).metrics.outstandingActions?.count, 5)
+  equal(snapshot(data).metrics.outstandingActions, { state: 'available', reasons: [], count: 4 })
+  equal(calculateSafetySnapshot(data, scope, { days: 30 }, asOf).metrics.outstandingActions?.count, 4)
   const actionCoverage = data.coverage.find((entry) => entry.source === 'actions')!
   actionCoverage.access = 'caller_visible'
   assert(snapshot(data).metrics.outstandingActions!.reasons.some((reason) => reason.includes('Caller-visible')),
@@ -281,7 +327,7 @@ Deno.test('risk formula, severity mapping, unknown classifications and minimum c
   const result = snapshot(data)
   equal(result.metrics.risk.score, 34)
   equal(result.metrics.risk.band, 'Medium')
-  equal(result.metrics.highRisk, { state: 'available', reasons: [], count: 40, openCount: 20 })
+  equal(result.metrics.highRisk, { state: 'available', reasons: [], count: 40, openCount: 20, closedCount: 20 })
   equal(result.metrics.risk.changePoints, null)
   equal(effectiveSafetySeverity(' low ', 'CRITICAL'), 4)
   equal(effectiveSafetySeverity('Low', 'Unmapped custom severity'), null)
@@ -456,7 +502,12 @@ Deno.test('resolution uses trusted closure cohort, excludes legacy and invalid d
   equal(result.metrics.resolution.previousAverageDays, 91)
   equal(result.metrics.resolution.changeDays, -82)
   equal(result.metrics.resolution.legacyClosedWithoutEvidence, 1)
-  equal(result.metrics.resolution.invalidDurations, 1)
+  equal(result.metrics.resolution.invalidDurations, 2)
+  const legacyOnly = dataset([data.rows.incidents[2]])
+  equal(snapshot(legacyOnly).metrics.resolution.invalidDurations, 1)
+  const negativeOnly = dataset([data.rows.incidents[3]])
+  negativeOnly.rows.closures = [data.rows.closures[2]]
+  equal(snapshot(negativeOnly).metrics.resolution.invalidDurations, 1)
   const closureCoverage = data.coverage.find((row) => row.source === 'closures')
   assert(closureCoverage, 'Missing fixture closure coverage')
   closureCoverage.complete = false

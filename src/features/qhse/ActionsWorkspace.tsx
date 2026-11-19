@@ -8,6 +8,7 @@ import { createAction, downloadQhseFile, getActionsWorkspace, resolveAction, rea
 import type { ActionRecord, ActionType, EligibleIncident, QhsePerson, QhseSite } from './inspectionActionService'
 import { ActionCreateForm } from './ActionCreateForm'
 import { ActionRegister } from './ActionRegister'
+import { ActionSuccessModal } from './ActionSuccessModal'
 import { companySettingsEventMatchesOrganization, companySettingsUpdatedEvent } from '../../lib/companySettingsSync'
 
 function localDateTime() {
@@ -62,6 +63,8 @@ export function ActionsWorkspace({ supabase, canManage, assignedOnly = false, sh
   const [loadedOrganizationActionsView, setLoadedOrganizationActionsView] = useState(false)
   const [actionTypeFilter, setActionTypeFilter] = useState<'all' | ActionType>('all')
   const [actionStatusFilter, setActionStatusFilter] = useState<'all' | 'open' | 'overdue' | 'closed'>('all')
+  const [successModalOpen, setSuccessModalOpen] = useState(false)
+  const [createdActionId, setCreatedActionId] = useState<string | null>(null)
   const submitInProgress = useRef(false)
 
   const refresh = useCallback(async () => {
@@ -123,7 +126,14 @@ export function ActionsWorkspace({ supabase, canManage, assignedOnly = false, sh
 
   const finishMutation = async (successMessage: string) => {
     await refresh()
-    if (organizationId) await queryClient.invalidateQueries({ queryKey: ['dashboard', organizationId] })
+    if (organizationId) {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['dashboard', organizationId] }),
+        queryClient.invalidateQueries({ queryKey: ['incidents'] }),
+        queryClient.invalidateQueries({ queryKey: ['investigation-register'] }),
+        queryClient.invalidateQueries({ queryKey: ['incident-workflow-notifications'] }),
+      ])
+    }
     if (assignedOnly && organizationId && currentUserId) {
       await queryClient.invalidateQueries({ queryKey: ['assigned-action-count', organizationId, currentUserId] })
     }
@@ -140,6 +150,8 @@ export function ActionsWorkspace({ supabase, canManage, assignedOnly = false, sh
     try {
       const result = await createAction(supabase, { type, description, siteId, assigneeId, dueAt, incidentId: incidentId || null })
       await finishMutation(result.notificationWarning || 'Action created and assigned.')
+      setCreatedActionId(result.actionId)
+      setSuccessModalOpen(true)
       setDescription('')
       setIncidentId('')
       setDueAt(localDateTime())
@@ -236,7 +248,7 @@ export function ActionsWorkspace({ supabase, canManage, assignedOnly = false, sh
       />
 
       {error && <Alert tone="danger">{error}</Alert>}
-      {message && <Alert tone="success">{message}</Alert>}
+      {message && !successModalOpen && <Alert tone="success">{message}</Alert>}
 
       <section className="border-y border-line">
         <div className="grid grid-cols-2 gap-4 py-4 sm:grid-cols-4">
@@ -319,6 +331,7 @@ export function ActionsWorkspace({ supabase, canManage, assignedOnly = false, sh
         busy={busy}
         resolutionAction={resolutionAction}
         resolutionNotes={resolutionNotes}
+        proofFile={proofFile}
         sites={sites}
         people={people}
         linkedIncidents={linkedIncidents}
@@ -337,6 +350,21 @@ export function ActionsWorkspace({ supabase, canManage, assignedOnly = false, sh
           void downloadQhseFile(supabase, action.proof_storage_path, action.proof_file_name).catch((downloadError: unknown) => {
             setError(downloadError instanceof Error ? downloadError.message : 'Unable to download proof.')
           })
+        }}
+      />
+
+      <ActionSuccessModal
+        open={successModalOpen}
+        onClose={() => {
+          setSuccessModalOpen(false)
+          setCreatedActionId(null)
+        }}
+        onViewInRegister={() => {
+          if (createdActionId) {
+            setSuccessModalOpen(false)
+            setCreatedActionId(null)
+            window.location.hash = `#corrective-actions?action=${createdActionId}`
+          }
         }}
       />
     </div>

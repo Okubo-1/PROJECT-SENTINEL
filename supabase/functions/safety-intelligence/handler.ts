@@ -58,6 +58,9 @@ export async function handleSafetyRequest(request: Request, runtime: SafetyRunti
     const scope = await resolveSafetyScope(client, context, filters.data)
     const asOf = runtime.now()
     const dataset = await retrieveSafetyDataset(client, context, filters.data)
+    const draftResult = await client.rpc('get_incident_draft_total')
+    if (draftResult.error || !Number.isSafeInteger(draftResult.data) || draftResult.data < 0) throw new SafetyRetrievalError()
+    dataset.draftTotal = draftResult.data
     const snapshot = calculateSafetySnapshot(dataset, scope, filters.data, asOf, runtime.now())
     if (readDeadline.aborted) return fail(504, 'request_timeout', 'Safety intelligence retrieval timed out.')
     return respond({ ok: true, requestId, snapshot }, 200)

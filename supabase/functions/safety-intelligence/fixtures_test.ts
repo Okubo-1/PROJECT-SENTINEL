@@ -14,6 +14,7 @@ export const scope: SafetyScope = {
 export function incident(n: number, overrides: Partial<SafetyIncident> = {}): SafetyIncident {
   return {
     id: id(100 + n), organization_id: org, reference_number: `TEST-${n}`, title: `Recorded event ${n}`,
+    is_anonymous: false,
       report_type: 'incident', status: 'submitted', occurred_at: '2026-10-02T12:00:00.000Z', reported_at: '2026-10-02T12:00:00.000Z', 
     site_id: site, facility_id: facility, severity: 'Low', potential_severity: null,
     incident_category: 'Equipment', ...overrides,

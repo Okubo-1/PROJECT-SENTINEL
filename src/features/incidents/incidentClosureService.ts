@@ -30,10 +30,28 @@ export const incidentClosureSchema = z.object({
   closed_at: z.iso.datetime({ offset: true }),
 })
 
+export class IncidentClosureAccessError extends Error {
+  constructor() {
+    super('Incident closure permission could not be verified. Please retry.')
+    this.name = 'IncidentClosureAccessError'
+  }
+}
+
 export async function getIncidentClosureAccess(client: SupabaseClient, organizationId: string) {
   const { data, error } = await client.rpc('can_close_incidents', { target_organization_id: organizationId })
-  if (error) throw new Error('Unable to verify incident closure permission. Please refresh.')
-  return z.boolean().parse(data)
+  if (error) {
+    console.error('Incident closure permission RPC failed.', {
+      code: error.code,
+      message: error.message,
+    })
+    throw new IncidentClosureAccessError()
+  }
+  const result = z.boolean().safeParse(data)
+  if (!result.success) {
+    console.error('Incident closure permission RPC returned an invalid result.')
+    throw new IncidentClosureAccessError()
+  }
+  return result.data
 }
 
 export async function getIncidentClosureCandidates(client: SupabaseClient) {

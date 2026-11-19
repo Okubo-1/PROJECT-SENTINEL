@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { SupabaseClient } from '@supabase/supabase-js'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 
 import {
   Alert,
@@ -16,6 +16,7 @@ import {
   SeverityBadge,
   Skeleton,
   StatusBadge,
+  Textarea,
   Timeline,
   buttonVariants,
 } from '../../components/ui'
@@ -29,9 +30,9 @@ import {
   useUploadIncidentEvidence,
 } from './useIncidentData'
 import type { IncidentEvidence } from './incidentTypes'
-import { IncidentClosureForm } from './IncidentClosure'
 import { getIncidentClosure } from './incidentClosureService'
-import { getActionsForIncidents } from '../qhse/inspectionActionService'
+import { getActionsForIncidents, getVerifierIncidentActions } from '../qhse/inspectionActionService'
+import { InvestigationDialog } from '../qhse/InvestigationDialog'
 import { effectiveIncidentSeverityLabel } from '../../../supabase/functions/_shared/incidentReportFilters'
 import { BooleanBadge, SectionTitle } from './IncidentDetailSection'
 import { IncidentEvidenceCard } from './IncidentEvidenceCard'
@@ -40,11 +41,13 @@ import { formatDate, formatLabel } from './incidentDetailFormatting'
 
 // This screen brings together the incident record, its activity history, and its evidence files.
 // Closure evidence is read separately so older records are not given invented closure details.
-export function IncidentDetailPage({ supabase, incidentId, canClose = false }: {
+export function IncidentDetailPage({ supabase, incidentId, canClose = false, canReopen = false }: {
   supabase: SupabaseClient
   incidentId: string | null
   canClose?: boolean
+  canReopen?: boolean
 }) {
+  const queryClient = useQueryClient()
   const incident = useIncident(supabase, incidentId)
   const organization = useIncidentOrganization(supabase)
   const activity = useIncidentActivity(supabase, incidentId)
@@ -54,19 +57,114 @@ export function IncidentDetailPage({ supabase, incidentId, canClose = false }: {
   const downloadEvidence = useDownloadIncidentEvidence(supabase)
   const [evidenceMessage, setEvidenceMessage] = useState('')
   const [evidenceError, setEvidenceError] = useState('')
-  const [closing, setClosing] = useState(false)
+  const [investigationOpen, setInvestigationOpen] = useState(false)
+  const [viewedIncidentId, setViewedIncidentId] = useState<string | null>(null)
+  const investigationViewed = incidentId !== null && viewedIncidentId === incidentId
+  const [closeoutBusy, setCloseoutBusy] = useState(false)
+  const [closeoutError, setCloseoutError] = useState('')
+  const [reopenOpen, setReopenOpen] = useState(false)
+  const [reopenHandlerId, setReopenHandlerId] = useState('')
+  const [reopenReason, setReopenReason] = useState('')
+  const [reopenBusy, setReopenBusy] = useState(false)
+  const [reopenError, setReopenError] = useState('')
   const [pendingDelete, setPendingDelete] = useState<IncidentEvidence | null>(null)
   const [currentTime, setCurrentTime] = useState(() => Date.now())
+  const investigation = useQuery({
+    queryKey: ['incident-investigation', incident.data?.organizationId || 'pending', incidentId || 'pending'],
+    queryFn: async () => {
+      const { data, error } = await supabase.from('investigations')
+        .select('id, status')
+        .eq('organization_id', incident.data!.organizationId)
+        .eq('incident_id', incidentId!)
+        .maybeSingle()
+      if (error) throw new Error('Unable to load the investigation for this incident.')
+      return data
+    },
+    enabled: Boolean((canClose || canReopen) && incident.data?.organizationId && incidentId),
+  })
+  const reopenHandlers = useQuery({
+    queryKey: ['incident-reopen-handlers', incident.data?.organizationId || 'pending'],
+    queryFn: async () => {
+      const { data, error } = await supabase.from('profiles')
+        .select('id, full_name')
+        .eq('organization_id', incident.data!.organizationId)
+        .eq('account_status', 'active')
+        .order('full_name')
+      if (error) throw new Error('Unable to load active incident handlers.')
+      return data || []
+    },
+    enabled: Boolean(canReopen && incident.data?.organizationId),
+  })
   const closure = useQuery({
     queryKey: ['incident-closure', incident.data?.organizationId, incidentId, organization.data?.userId],
     queryFn: () => getIncidentClosure(supabase, incidentId!),
     enabled: Boolean(organization.data?.userId && incidentId && incident.data?.status === 'closed'),
   })
   const linkedActions = useQuery({
-    queryKey: ['incident-linked-actions', incident.data?.organizationId || 'pending', organization.data?.userId || 'pending', incidentId || 'pending'],
-    queryFn: () => getActionsForIncidents(supabase, incident.data!.organizationId, [incidentId!]),
+    queryKey: ['incident-linked-actions', incident.data?.organizationId || 'pending', organization.data?.userId || 'pending', incidentId || 'pending', canClose],
+    queryFn: () => canClose
+      ? getVerifierIncidentActions(supabase, incidentId!)
+      : getActionsForIncidents(supabase, incident.data!.organizationId, [incidentId!]),
     enabled: Boolean(incident.data?.organizationId && incidentId),
   })
+  const currentUserResolvedAction = Boolean(linkedActions.data?.some((action) =>
+    action.resolved_by === organization.data?.userId))
+
+  const refreshWorkflow = async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['incidents'] }),
+      queryClient.invalidateQueries({ queryKey: ['dashboard', incident.data?.organizationId] }),
+      queryClient.invalidateQueries({ queryKey: ['investigation-register'] }),
+      queryClient.invalidateQueries({ queryKey: ['incident-workflow-notifications'] }),
+      queryClient.invalidateQueries({ queryKey: ['incident-investigation'] }),
+    ])
+    if (incident.data?.organizationId && incidentId) {
+      await queryClient.invalidateQueries({
+        queryKey: ['incidents', 'detail', incident.data.organizationId, incidentId],
+      })
+    }
+  }
+
+  const confirmCloseout = async () => {
+    if (!incidentId || !investigationViewed || currentUserResolvedAction) return
+    setCloseoutBusy(true)
+    setCloseoutError('')
+    try {
+      const { error } = await supabase.rpc('confirm_incident_closeout', {
+        target_incident_id: incidentId,
+      })
+      if (error) throw new Error(error.message)
+      setViewedIncidentId(null)
+      await refreshWorkflow()
+    } catch (error) {
+      setCloseoutError(error instanceof Error ? error.message : 'Unable to confirm incident close-out.')
+    } finally {
+      setCloseoutBusy(false)
+    }
+  }
+
+  const reopenIncident = async () => {
+    if (!incidentId || !reopenHandlerId) return
+    setReopenBusy(true)
+    setReopenError('')
+    try {
+      const { error } = await supabase.rpc('reopen_incident', {
+        target_incident_id: incidentId,
+        p_assigned_to: reopenHandlerId,
+        p_reason: reopenReason.trim() || null,
+      })
+      if (error) throw new Error(error.message)
+      setReopenOpen(false)
+      setViewedIncidentId(null)
+      setReopenReason('')
+      setReopenHandlerId('')
+      await refreshWorkflow()
+    } catch (error) {
+      setReopenError(error instanceof Error ? error.message : 'Unable to reopen this incident.')
+    } finally {
+      setReopenBusy(false)
+    }
+  }
 
   useEffect(() => {
     const timer = window.setInterval(() => setCurrentTime(Date.now()), 60_000)
@@ -118,8 +216,10 @@ export function IncidentDetailPage({ supabase, incidentId, canClose = false }: {
     setEvidenceError('')
     setEvidenceMessage('')
     try {
-      await uploadEvidence.mutateAsync({ incidentId, file })
-      setEvidenceMessage('Evidence uploaded securely.')
+      const evidence = await uploadEvidence.mutateAsync({ incidentId, file })
+      setEvidenceMessage(evidence.sanitization === 'unverified'
+        ? 'Evidence uploaded privately. It may contain identifying details; sanitization could not be verified.'
+        : 'Evidence uploaded securely.')
     } catch (error) {
       setEvidenceError(error instanceof Error ? error.message : 'Unable to upload evidence.')
     }
@@ -160,8 +260,33 @@ export function IncidentDetailPage({ supabase, incidentId, canClose = false }: {
         description={`${data.referenceNumber} · ${formatLabel(data.reportType)}`}
         actions={
           <>
-            {canClose && data.status !== 'draft' && data.status !== 'closed' && (
-              <Button variant="danger" size="sm" onClick={() => setClosing(true)}>Close incident</Button>
+            {canClose && investigation.data && (
+              <Button variant="outline" size="sm" onClick={() => setInvestigationOpen(true)}>
+                Investigation
+              </Button>
+            )}
+            {canClose && data.status === 'pending_verification' && (
+              <Button
+                variant="danger"
+                size="sm"
+                disabled={!investigationViewed || currentUserResolvedAction || linkedActions.isLoading || linkedActions.isError || closeoutBusy}
+                loading={closeoutBusy}
+                onClick={() => void confirmCloseout()}
+              >
+                Confirm close-out
+              </Button>
+            )}
+            {canReopen && (data.status === 'closed' || investigation.data?.status === 'completed') && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  setReopenHandlerId(reopenHandlers.data?.[0]?.id || '')
+                  setReopenOpen(true)
+                }}
+              >
+                Reopen
+              </Button>
             )}
             <a href="#my-reports" className={buttonVariants({ variant: 'outline', size: 'sm' })}>
               <Icon name="arrowLeft" size={15} />My reports
@@ -175,7 +300,10 @@ export function IncidentDetailPage({ supabase, incidentId, canClose = false }: {
         <Card className="h-full p-5 shadow-none xl:col-span-4">
           <SectionTitle title="At a glance" />
           <div className="mt-4 flex flex-wrap items-center gap-2">
-            <StatusBadge status={data.status} />
+            <StatusBadge
+              status={data.status}
+              label={data.status === 'pending_verification' ? 'Resolved, awaiting verification' : undefined}
+            />
             <SeverityBadge severity={effectiveSeverity.toLowerCase()} />
           </div>
           <DetailList
@@ -217,7 +345,12 @@ export function IncidentDetailPage({ supabase, incidentId, canClose = false }: {
             columns={2}
             items={[
               { label: 'Report type', value: formatLabel(data.reportType) },
-              { label: 'Status', value: <StatusBadge status={data.status} /> },
+              { label: 'Status', value: (
+                <StatusBadge
+                  status={data.status}
+                  label={data.status === 'pending_verification' ? 'Resolved, awaiting verification' : undefined}
+                />
+              ) },
               { label: 'Actual severity', value: <SeverityBadge severity={data.severity?.toLowerCase()} /> },
               { label: 'Potential severity', value: <SeverityBadge severity={data.potentialSeverity?.toLowerCase()} /> },
               { label: 'Incident category', value: data.incidentCategory || 'Not available' },
@@ -335,20 +468,75 @@ export function IncidentDetailPage({ supabase, incidentId, canClose = false }: {
         </Card>
       </div>
 
-      {closing && canClose && data.status !== 'closed' && (
+      {closeoutError && <Alert tone="danger">{closeoutError}</Alert>}
+      {data.status === 'pending_verification' && canClose && (
+        <p className="text-sm text-muted">
+          {currentUserResolvedAction
+            ? 'A person who resolved an action on this incident cannot verify its close-out.'
+            : investigationViewed
+              ? 'Investigation viewed. You may confirm close-out.'
+              : 'Open the investigation before confirming close-out.'}
+        </p>
+      )}
+      {investigation.isError && canClose && <Alert tone="danger">{investigation.error.message}</Alert>}
+      {investigationOpen && investigation.data?.id && (
+        <InvestigationDialog
+          client={supabase}
+          investigationId={investigation.data.id}
+          onClose={() => setInvestigationOpen(false)}
+          onVerificationViewed={data.status === 'pending_verification'
+            ? () => setViewedIncidentId(incidentId)
+            : undefined}
+        />
+      )}
+
+      {reopenOpen && canReopen && (
         <Dialog
           open
-          onClose={() => setClosing(false)}
-          title={`Close incident ${data.referenceNumber}`}
-          description={data.title}
+          onClose={() => !reopenBusy && setReopenOpen(false)}
+          title={`Reopen incident ${data.referenceNumber}`}
+          description="Choose the handler. The selected handler and investigation team will be notified."
         >
-          <IncidentClosureForm
-            key={data.id}
-            variant="dialog"
-            client={supabase}
-            incident={data}
-            onDismiss={() => setClosing(false)}
-          />
+          <div className="grid gap-4">
+            {reopenHandlers.isLoading ? (
+              <Skeleton className="h-10" />
+            ) : reopenHandlers.isError ? (
+              <Alert tone="danger">{reopenHandlers.error.message}</Alert>
+            ) : (
+              <label className="grid gap-1 text-sm font-medium text-foreground">
+                Assigned handler
+                <select
+                  className="rounded-lg border border-line bg-surface px-3 py-2"
+                  value={reopenHandlerId}
+                  onChange={(event) => setReopenHandlerId(event.target.value)}
+                  disabled={reopenBusy}
+                >
+                  <option value="">Select a handler</option>
+                  {reopenHandlers.data?.map((person) => (
+                    <option key={person.id} value={person.id}>{person.full_name}</option>
+                  ))}
+                </select>
+              </label>
+            )}
+            <label className="grid gap-1 text-sm font-medium text-foreground">
+              Reason (optional)
+              <Textarea
+                value={reopenReason}
+                onChange={(event) => setReopenReason(event.target.value)}
+                maxLength={5000}
+                rows={3}
+                disabled={reopenBusy}
+              />
+            </label>
+            {reopenError && <Alert tone="danger">{reopenError}</Alert>}
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" disabled={reopenBusy} onClick={() => setReopenOpen(false)}>Cancel</Button>
+              <Button disabled={!reopenHandlerId || reopenHandlers.isLoading || reopenHandlers.isError}
+                loading={reopenBusy} onClick={() => void reopenIncident()}>
+                Reopen incident
+              </Button>
+            </div>
+          </div>
         </Dialog>
       )}
 

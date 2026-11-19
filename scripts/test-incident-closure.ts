@@ -1,6 +1,6 @@
 import { createClient } from '@supabase/supabase-js'
 import {
-  closeIncident, getIncidentClosureAccess, getIncidentClosureCandidates,
+  closeIncident, getIncidentClosureAccess, getIncidentClosureCandidates, IncidentClosureAccessError,
   getIncidentClosure, incidentClosureInputSchema, searchIncidentClosureCandidates, setIncidentClosureDelegate,
 } from '../src/features/incidents/incidentClosureService.ts'
 import { getIncidents } from '../src/features/incidents/incidentService.ts'
@@ -69,6 +69,28 @@ Deno.test('closure and delegation clients send only target IDs and evidence, not
   }), 'Closure RPC payload differs')
   assert(JSON.stringify(requests[1].body) === JSON.stringify({ p_user_id: userId, p_enabled: true }), 'Delegation payload differs')
   assert(!('closed_by' in requests[0].body) && !('organization_id' in requests[1].body), 'Client supplied trusted identity')
+})
+
+Deno.test('closure permission denial is distinct from a technical verification failure', async () => {
+  const deniedClient = clientWithFetch(() => new Response('false', {
+    status: 200, headers: { 'Content-Type': 'application/json' },
+  }))
+  assert(await getIncidentClosureAccess(deniedClient, organizationId) === false, 'Permission denial was not preserved')
+
+  const failedClient = clientWithFetch(() => new Response(JSON.stringify({
+    code: 'PGRST202', details: null, hint: null, message: 'Function is missing from the schema cache',
+  }), { status: 404, headers: { 'Content-Type': 'application/json' } }))
+  const originalConsoleError = console.error
+  console.error = () => {}
+  try {
+    await getIncidentClosureAccess(failedClient, organizationId)
+    throw new Error('Technical verification failure was treated as success')
+  } catch (error) {
+    assert(error instanceof IncidentClosureAccessError, 'Technical failure was reported as permission denial')
+    assert(error.message.includes('retry'), 'Technical failure did not provide safe retry guidance')
+  } finally {
+    console.error = originalConsoleError
+  }
 })
 
 Deno.test('client exposes closure rejection and validates roster and closure evidence', async () => {

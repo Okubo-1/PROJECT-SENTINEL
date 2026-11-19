@@ -14,7 +14,7 @@ export const safetyFiltersSchema = z.object({
   status: z.string().min(1).optional(),
   severity: z.string().min(1).optional(),
   reportType: z.string().min(1).optional(),
-})
+}).strict()
 export type SafetyFilters = z.infer<typeof safetyFiltersSchema>
 
 const uuid = z.uuid()
@@ -23,6 +23,7 @@ const status = z.string().transform(normalizeIncidentStatus)
 // Timestamp strings remain nullable so missing/bad historical dates become coverage limitations.
 export const safetyIncidentSchema = z.object({
   id: uuid, organization_id: uuid, reference_number: z.string(), title: z.string(),
+  is_anonymous: z.boolean(),
   report_type: z.string().min(1),
   status, occurred_at: text, reported_at: text, updated_at: text.optional(),
   site_id: uuid.nullable(), facility_id: uuid.nullable(),
@@ -106,6 +107,7 @@ export const safetyCompanySettingsSchema = z.object({
 export type SafetyCompanySettings = z.infer<typeof safetyCompanySettingsSchema>
 export type SafetyDataset = {
   rows: SafetyRows
+  draftTotal?: number
   incidentList?: SafetyRows['incidents']
   planningIncidents?: SafetyRows['incidents']
   planningActions?: SafetyRows['actions']
@@ -180,14 +182,15 @@ export const safetySnapshotSchema = z.object({
   metrics: z.object({
     // Additive fields allow the existing six cards to work with an older deployed endpoint.
     incidentCounts: metricBase.extend({
-      total: count, open: count, closed: count, drafts: count.optional(), nearMiss: count.optional(),
+      total: count, open: count, closed: count, drafts: count.optional(),
+      draftScope: z.literal('organization_open').optional(), nearMiss: count.optional(),
     }).optional(),
     outstandingActions: metricBase.extend({ count }).optional(),
     risk: metricBase.extend({
       score: z.number().min(0).max(100).nullable(), band: band.nullable(), sampleSize: count,
       changePoints: z.null(), comparisonReason: z.literal('Historical open-state observations are unavailable.'),
     }),
-    highRisk: metricBase.extend({ count, openCount: count }),
+    highRisk: metricBase.extend({ count, openCount: count, closedCount: count.optional() }),
     nearMiss: metricBase.extend({
       currentCount: count, previousCount: count, percentageChange: z.number().nullable(),
       direction: z.enum(['up', 'down', 'unchanged', 'new_reporting', 'no_reports']),

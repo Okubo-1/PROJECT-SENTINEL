@@ -42,7 +42,11 @@ export function RecentIncidentsCard({ incidents }: { incidents: DashboardInciden
                 <SeverityBadge severity={incident.severity} className="shrink-0" />
               </div>
               <div className="flex min-w-0 items-center gap-2">
-                <StatusBadge status={incident.status} className="shrink-0" />
+                <StatusBadge
+                  status={incident.status}
+                  label={incident.status === 'pending_verification' ? 'Resolved, awaiting verification' : undefined}
+                  className="shrink-0"
+                />
                 {incident.location && <span className="min-w-0 truncate text-xs text-muted">{incident.location}</span>}
               </div>
             </a>

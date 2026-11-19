@@ -97,7 +97,10 @@ export async function buildCopilotGrounding(
     ],
     contextTruncated: snapshot.evidenceTruncated || evidence.length > 20 || locations.length > 12 || planning.locations.length > 12,
   })
-  const serialize = () => JSON.stringify({ authorized_operational_context: context })
+  const serialize = () => {
+    const { userId: _userId, ...providerScope } = context.scope
+    return JSON.stringify({ authorized_operational_context: { ...context, scope: providerScope } })
+  }
   // Operational context uses at most 16k characters within a total 24k prompt/history/context budget.
   while (serialize().length > 16_000) {
     context.contextTruncated = true

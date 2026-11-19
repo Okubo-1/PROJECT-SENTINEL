@@ -1,5 +1,6 @@
 import { createClient } from 'npm:@supabase/supabase-js@2'
 import { sendActionAssignmentEmail } from '../_shared/inviteEmail.ts'
+import { logNotificationFailure } from './logging.ts'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -131,9 +132,8 @@ Deno.serve(async (request: Request) => {
     if (completeError) throw new Error(completeError.message)
     eventClaimed = false
     return jsonResponse({ success: true, emailSent: true })
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unexpected error'
-    console.error(JSON.stringify({ event: 'action_assignment_notification_failed', stage, actorId, eventId, message }))
+  } catch {
+    logNotificationFailure('action_assignment_notification_failed', stage)
     if (eventClaimed && eventId && actorId) {
       try {
         const supabaseUrl = Deno.env.get('SUPABASE_URL')
@@ -147,11 +147,11 @@ Deno.serve(async (request: Request) => {
             failure_code: stage,
           })
           if (statusError) {
-            console.error(JSON.stringify({ event: 'action_assignment_notification_failure_status_update_failed', eventId, message: statusError.message }))
+            logNotificationFailure('action_assignment_notification_failure_status_update_failed', stage)
           }
         }
-      } catch (recordError) {
-        console.error(JSON.stringify({ event: 'action_assignment_notification_failure_record_failed', stage, eventId, message: recordError instanceof Error ? recordError.message : 'Unexpected error' }))
+      } catch {
+        logNotificationFailure('action_assignment_notification_failure_record_failed', stage)
       }
     }
     return jsonResponse({ success: false, emailSent: false, error: 'Action assignment email delivery failed' })

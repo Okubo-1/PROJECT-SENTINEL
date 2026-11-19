@@ -88,7 +88,7 @@ export async function retrieveSafetyDataset(
   const canReadOrganization = await canReadOrganizationIncidents(client, context)
   // Only the caller's anon-key/token client is accepted. No privileged client is created here.
   const [incidents, legacyActions, newActions, investigations, causes, findings, closures, sites, facilities, settingsResult] = await Promise.all([
-    readPages(client, org, 'incidents', 'id,organization_id,reference_number,title,report_type,status,occurred_at,reported_at,updated_at,site_id,facility_id,department,shift,severity,potential_severity,incident_category,client_submission_id,digital_signature', safetyIncidentSchema, 'id', limits),
+    readPages(client, org, 'incidents', 'id,organization_id,reference_number,title,report_type,status,occurred_at,reported_at,updated_at,site_id,facility_id,department,shift,severity,potential_severity,incident_category,client_submission_id,digital_signature,is_anonymous', safetyIncidentSchema, 'id', limits, true),
     readPages(client, org, 'corrective_actions', 'id,organization_id,incident_id,title,status,due_date', safetyActionSchema, 'id', limits),
     readPages(client, org, 'actions', 'id,organization_id,incident_id,description,type,status,due_at', safetyNewActionSchema, 'id', limits),
     readPages(client, org, 'investigations', 'id,organization_id,incident_id,status,completed_at,findings_summary', safetyInvestigationSchema, 'id', limits),
@@ -136,7 +136,13 @@ export async function retrieveSafetyDataset(
       && normalizeIncidentReportType(row.report_type) !== normalizeIncidentReportType(filters.reportType)) return false
     return true
   }
+  const anonymousIds = new Set(incidents.rows.filter((row) => row.is_anonymous).map((row) => row.id))
+  const safeIncident = (row: SafetyDataset['rows']['incidents'][number]) => row.is_anonymous
+    ? { ...row, title: 'Anonymous incident', client_submission_id: null, digital_signature: null }
+    : row
   const scopedIncidents = incidents.rows
+    .filter((row) => !isDraftIncidentStatus(row.status))
+    .map(safeIncident)
     .filter((row) => !filters.siteId || row.site_id === filters.siteId)
     .filter(matchesIncidentFilters)
   const syntheticCount = scopedIncidents.filter(isExcludedSyntheticSafetyIncident).length
@@ -145,7 +151,9 @@ export async function retrieveSafetyDataset(
   const incidentIds = new Set(visibleIncidents.map((row) => row.id))
   const planningIncidentIds = new Set(visiblePlanningIncidents.map((row) => row.id))
   const visibleInvestigations = investigations.rows.filter((row) => incidentIds.has(row.incident_id))
+    .map((row) => anonymousIds.has(row.incident_id) ? { ...row, findings_summary: null } : row)
   const investigationIds = new Set(visibleInvestigations.map((row) => row.id))
+  const anonymousInvestigationIds = new Set(visibleInvestigations.filter((row) => anonymousIds.has(row.incident_id)).map((row) => row.id))
   const siteIds = new Set(visibleIncidents.map((row) => row.site_id))
   const planningSiteIds = new Set(visiblePlanningIncidents.map((row) => row.site_id))
   const facilityIds = new Set(visibleIncidents.map((row) => row.facility_id))
@@ -153,16 +161,21 @@ export async function retrieveSafetyDataset(
   // Intersect both permissions before any such data can enter shared/model context.
   const rows = {
     incidents: visibleIncidents,
-    actions: actions.rows.filter((row) => row.incident_id !== null && incidentIds.has(row.incident_id)),
+    actions: actions.rows.filter((row) => row.incident_id !== null && incidentIds.has(row.incident_id))
+      .map((row) => row.incident_id && anonymousIds.has(row.incident_id) ? { ...row, title: 'Anonymous incident action' } : row),
     investigations: visibleInvestigations,
-    causes: causes.rows.filter((row) => investigationIds.has(row.investigation_id)),
-    findings: findings.rows.filter((row) => investigationIds.has(row.investigation_id)),
-    closures: closures.rows.filter((row) => incidentIds.has(row.incident_id)),
+    causes: causes.rows.filter((row) => investigationIds.has(row.investigation_id))
+      .map((row) => anonymousInvestigationIds.has(row.investigation_id) ? { ...row, root_cause_statement: '', cause_category: null } : row),
+    findings: findings.rows.filter((row) => investigationIds.has(row.investigation_id))
+      .map((row) => anonymousInvestigationIds.has(row.investigation_id) ? { ...row, description: '', finding_type: null } : row),
+    closures: closures.rows.filter((row) => incidentIds.has(row.incident_id))
+      .map((row) => anonymousIds.has(row.incident_id) ? { ...row, root_cause: '', corrective_action: '' } : row),
     sites: sites.rows.filter((row) => siteIds.has(row.id)),
     facilities: facilities.rows.filter((row) => facilityIds.has(row.id)
       && (!filters.siteId || row.site_id === filters.siteId)),
   }
   const planningActions = actions.rows.filter((row) => row.incident_id !== null && planningIncidentIds.has(row.incident_id))
+    .map((row) => row.incident_id && anonymousIds.has(row.incident_id) ? { ...row, title: 'Anonymous incident action' } : row)
   const coverage: SafetyCoverage[] = (Object.keys(pages) as Array<keyof typeof pages>).map((source) => ({
     source, retrieved: source === 'incidents' ? scopedIncidents.length : rows[source].length, included: rows[source].length,
     complete: pages[source].complete,
@@ -170,8 +183,6 @@ export async function retrieveSafetyDataset(
     reasons: [
       ...(pages[source].complete ? [] : ['Authorized source exceeded the retrieval limit.']),
       ...(source === 'incidents' && syntheticCount ? [`${syntheticCount} confirmed synthetic incident records are excluded from operational analytics.`] : []),
-      ...(source === 'incidents' && visiblePlanningIncidents.some((row) => isDraftIncidentStatus(row.status))
-        ? ['Visible draft reports are included in planning counts only.'] : []),
     ],
   }))
   const planningSites = sites.rows.filter((row) => planningSiteIds.has(row.id))

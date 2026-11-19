@@ -1,19 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 
-// Mirrors use_ai_assistant grants in the existing frontend legacy role permission map.
-const builtInAiRoles = new Set([
-  'Super Administrator',
-  'Organization Administrator',
-  'QHSE Manager',
-  'Site Supervisor',
-  'Safety Officer / HSE Officer',
-  'Auditor',
-  'Maintenance Engineer',
-  'Field Worker',
-  'Contractor',
-  'Executive / Management',
-])
-
 export type AiAccessContext = {
   userId: string
   organizationId: string
@@ -50,12 +36,11 @@ export async function authenticateOrganization(client: SupabaseClient): Promise<
 }
 
 export async function requireAiPermission(client: SupabaseClient, context: AiAccessContext) {
-  if (hasAiPermission(context.role)) return
-  const { data, error } = await client.from('custom_roles').select('permissions')
-    .eq('organization_id', context.organizationId).eq('name', context.role)
-    .eq('is_active', true).maybeSingle()
-  if (error) throw new AiAccessError('Unable to verify AI permission', 503)
-  if (!hasAiPermission(context.role, data?.permissions)) {
+  const { data, error } = await client.rpc('can_use_ai_sessions', {
+    target_organization_id: context.organizationId,
+  })
+  if (error || typeof data !== 'boolean') throw new AiAccessError('Unable to verify AI permission', 503)
+  if (!data) {
     throw new AiAccessError('You are not authorized to use the AI service', 403)
   }
 }
@@ -106,11 +91,6 @@ export function resolveAiAccessContext(
     organizationId: profile.organization_id,
     role: membership.role,
   }
-}
-
-export function hasAiPermission(role: string, customPermissions: unknown = []) {
-  if (builtInAiRoles.has(role)) return true
-  return Array.isArray(customPermissions) && customPermissions.includes('use_ai_assistant')
 }
 
 export function parseAiPrompt(body: unknown): string | null {

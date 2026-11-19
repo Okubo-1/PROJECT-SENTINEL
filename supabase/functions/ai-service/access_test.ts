@@ -1,5 +1,5 @@
-import { hasAiPermission, parseAiPrompt, resolveAiAccessContext } from './access.ts'
-import { BUILT_IN_BACKEND_ROLES, hasPermission } from '../../../src/data/userManagementConfig.ts'
+import { createClient } from '@supabase/supabase-js'
+import { AiAccessError, parseAiPrompt, requireAiPermission, resolveAiAccessContext } from './access.ts'
 
 // Unit checks of trusted-context validation; these do not replace database RLS or endpoint tests.
 function assertEquals<T>(actual: T, expected: T) {
@@ -22,20 +22,24 @@ Deno.test('AI context requires an active matching profile and membership', () =>
   assertEquals(resolveAiAccessContext(userId, profile, null), null)
 })
 
-// Catch permission drift without trusting browser-supplied permissions at runtime.
-Deno.test('server AI grants stay aligned with the existing application permission map', () => {
-  for (const role of [...BUILT_IN_BACKEND_ROLES, 'Custom Safety Role']) {
-    for (const permissions of [[], ['use_ai_assistant'], ['view_dashboard']]) {
-      assertEquals(hasAiPermission(role, permissions), hasPermission(role, 'use_ai_assistant', permissions))
+Deno.test('AI permission uses the organization grant and fails closed', async () => {
+  for (const [result, expected] of [[true, 200], [false, 403], [null, 503]] as const) {
+    const client = createClient('https://permission-test.invalid', 'test-key', {
+      global: { fetch: (_input, init) => {
+        assertEquals(JSON.parse(String(init?.body)).target_organization_id, 'org-1')
+        return Promise.resolve(new Response(JSON.stringify(result), { headers: { 'Content-Type': 'application/json' } }))
+      } },
+      auth: { persistSession: false, autoRefreshToken: false },
+    })
+    let status = 200
+    try {
+      await requireAiPermission(client, { userId: 'user-1', organizationId: 'org-1', role: 'Field Worker' })
+    } catch (error) {
+      if (!(error instanceof AiAccessError)) throw error
+      status = error.status
     }
+    assertEquals(status, expected)
   }
-})
-
-Deno.test('AI permission follows built-in and custom role grants', () => {
-  assertEquals(hasAiPermission('Field Worker'), true)
-  assertEquals(hasAiPermission('Custom Safety Role', ['use_ai_assistant']), true)
-  assertEquals(hasAiPermission('Custom Safety Role', ['view_dashboard']), false)
-  assertEquals(hasAiPermission('Unknown Role'), false)
 })
 
 Deno.test('AI prompt body rejects client-supplied identity and organization context', () => {

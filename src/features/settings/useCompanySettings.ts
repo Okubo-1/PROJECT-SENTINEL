@@ -528,16 +528,17 @@ export function useCompanySettings({ organizationId, userId }: { organizationId:
     setMessage('')
     if (!name) {
       setError('Department name is required.')
-      return
+      return false
     }
-    if (!await checkArchivedName('department', name)) return
+    if (!await checkArchivedName('department', name)) return false
     if (departments.some((department) => !department.deleted && department.name.trim().toLowerCase() === name.toLowerCase())) {
       setError('That department already exists.')
-      return
+      return false
     }
     setDepartments((current) => [...current, { id: crypto.randomUUID(), name, active: true }])
     setDepartmentDraft('')
     setMessage('Department added — save to apply.')
+    return true
   }
 
   const openShiftEditor = (shift?: CompanyShiftSetting) => {
@@ -579,19 +580,19 @@ export function useCompanySettings({ organizationId, userId }: { organizationId:
     setMessage('')
     if (!name) {
       setError('Site name is required.')
-      return
+      return false
     }
     const editingSite = editingSiteId ? sites.find((site) => site.id === editingSiteId) : null
-    if (!editingSite && !await checkArchivedName('site', name)) return
+    if (!editingSite && !await checkArchivedName('site', name)) return false
     if (editingSite && name.toLowerCase() !== editingSite.name.trim().toLowerCase()
-      && !await checkArchivedName('site', name)) return
+      && !await checkArchivedName('site', name)) return false
     if (sites.some((site) => site.id !== editingSiteId && !site.deleted && site.name.trim().toLowerCase() === name.toLowerCase())) {
       setError('That site already exists.')
-      return
+      return false
     }
     if (!siteCodeDraft) {
       setError('Generate a site code before adding the site.')
-      return
+      return false
     }
     setSites((current) => editingSiteId
       ? current.map((site) => site.id === editingSiteId ? { ...site, name, code: siteCodeDraft } : site)
@@ -601,6 +602,7 @@ export function useCompanySettings({ organizationId, userId }: { organizationId:
     setSiteOpen(false)
     setEditingSiteId(null)
     setMessage(editingSite ? 'Site updated — save to apply.' : 'Site added — save to apply.')
+    return true
   }
 
   const openContactEditor = (contact?: EmergencyContact) => {

@@ -12,7 +12,8 @@ export function ReportStageEvidence({ form, loadedIncident, isBusy, onEvidence }
   onEvidence: (event: ChangeEvent<HTMLInputElement>) => void
 }) {
   return (
-    <FormSection title="Evidence and sign-off" description="Images, PDF, Word, Excel, and video evidence are supported.">
+    <FormSection title="Evidence and sign-off" description="Evidence is optional. Images, PDF, Word, Excel, and video evidence are supported.">
+      <p className="mb-3 text-sm text-muted">Photos and documents may show your name, face or other details. Check before you upload.</p>
       <div className="grid gap-3 sm:grid-cols-3">
         <label className="flex cursor-pointer flex-col items-center gap-2 rounded-xl border border-dashed border-line bg-surface-soft px-4 py-6 text-center transition-colors hover:border-brand/50">
           <Icon name="camera" size={20} className="text-brand" />

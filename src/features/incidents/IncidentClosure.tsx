@@ -48,6 +48,7 @@ export function IncidentClosureForm({ client, incident, onDismiss, variant = 'pa
 
   const form = (
     <form className="grid gap-4" onSubmit={submit}>
+      {incident.isAnonymous && <p className="text-sm text-muted">Do not include names or details that could identify you.</p>}
       <Field label="Root cause" htmlFor="incident-closure-root-cause" required hint="What caused the incident?">
         <Textarea
           id="incident-closure-root-cause"

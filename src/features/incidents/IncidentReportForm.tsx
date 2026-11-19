@@ -15,14 +15,20 @@ import {
 } from '../../components/ui'
 import { ReportStageEvent } from './ReportStageEvent'
 import { ReportStageLocation } from './ReportStageLocation'
+import type { ReportFacility } from './ReportStageLocation'
 import { ReportStagePeople } from './ReportStagePeople'
+import type { ReportingIdentity } from './ReportStagePeople'
 import { ReportStageEvidence } from './ReportStageEvidence'
 import { ReportStepChips, ReportStepRail } from './ReportWizardSteps'
 import { ReportWizardFooter } from './ReportWizardFooter'
 import { SubmitIncidentDialogs } from './SubmitIncidentDialogs'
 import { incidentFormSchema, incidentSubmissionSchema, type IncidentFormValues } from './incidentSchemas'
 import { enqueueIncidentSubmission } from './incidentOfflineQueue'
+import { getAnonymousDraftOwnerToken, getIncident, saveAnonymousIncidentDraft, submitAnonymousIncidentDraft } from './incidentService'
+import { getOfflineAnonymousDraft, saveOfflineAnonymousDraft, syncOfflineAnonymousDrafts } from './anonymousDraftQueue'
+import type { AnonymousDraftQueueItem } from './anonymousDraftQueue'
 import { companySettingsEventMatchesOrganization, companySettingsUpdatedEvent } from '../../lib/companySettingsSync'
+import { normalizeDepartmentSettings } from '../settings/companySettingsTypes'
 import { useCreateIncidentDraft, useIncident, useIncidentOrganization, useSubmitIncident, useSubmitNewIncident, useUpdateIncidentDraft, useUploadIncidentEvidence } from './useIncidentData'
 import type { IncidentDetail, IncidentDraftInput, IncidentReportType, IncidentSubmissionInput } from './incidentTypes'
 
@@ -81,7 +87,7 @@ function formatLocalDate(date: Date | null) {
 }
 
 // Save only incident-domain values plus the current wizard stage, leaving browser-only date/time fields out of the payload.
-function toDraftInput(values: IncidentFormValues, draftStage: number): IncidentDraftInput {
+function toDraftInput(values: IncidentFormValues, draftStage: number, existingEquipment?: string | null): IncidentDraftInput {
   const contractorOrganization = values.contractorOrganization?.trim() || undefined
   return {
     reportType: values.reportType,
@@ -89,10 +95,10 @@ function toDraftInput(values: IncidentFormValues, draftStage: number): IncidentD
     title: values.title,
     description: values.description,
     occurredAt: combineOccurrenceDateTime(values),
-    siteId: values.siteId,
+    siteId: values.locationType === 'department' ? undefined : values.siteId,
     facilityId: values.facilityId,
     location: values.location,
-    department: values.department,
+    department: values.locationType === 'site' ? undefined : values.department,
     shift: values.shift,
     workActivityContext: values.workActivityContext,
     severity: values.severity,
@@ -108,7 +114,7 @@ function toDraftInput(values: IncidentFormValues, draftStage: number): IncidentD
     priority: values.priority,
     gpsCoordinates: values.gpsCoordinates,
     weatherConditions: values.weatherConditions,
-    equipmentInvolved: values.equipmentInvolved,
+    equipmentInvolved: existingEquipment || undefined,
     peopleInvolved: values.peopleInvolved,
     witnesses: values.witnesses,
     potentialRootCause: values.potentialRootCause,
@@ -121,6 +127,7 @@ const submissionFieldForPath: Record<string, keyof IncidentFormValues> = {
   title: 'title',
   description: 'description',
   siteId: 'siteId',
+  facilityId: 'facilityId',
   severity: 'severity',
   potentialSeverity: 'potentialSeverity',
   incidentCategory: 'incidentCategory',
@@ -139,26 +146,35 @@ const submissionStageByField: Partial<Record<keyof IncidentFormValues, number>> 
   description: 0,
   environmentalImpact: 0,
   siteId: 1,
+  facilityId: 1,
   immediateCorrection: 2,
   accuracyConfirmed: 3,
 }
 
 // One editor handles both new reports and drafts reopened from My Reports.
 // It keeps the staged form data together while the user saves a draft, adds evidence, or submits the report.
-export function IncidentReportForm({ supabase, reportType, initialTitle, initialCategory, initialEnvironmentalImpact, draftId: existingDraftId, initialIncident }: { supabase: SupabaseClient; reportType: IncidentReportType; initialTitle?: string; initialCategory?: string; initialEnvironmentalImpact?: boolean; draftId?: string; initialIncident?: IncidentDetail }) {
+export function IncidentReportForm({ supabase, reportType, initialTitle, initialCategory, initialEnvironmentalImpact, draftId: existingDraftId, initialIncident, offlineDraft }: { supabase: SupabaseClient; reportType: IncidentReportType; initialTitle?: string; initialCategory?: string; initialEnvironmentalImpact?: boolean; draftId?: string; initialIncident?: IncidentDetail; offlineDraft?: AnonymousDraftQueueItem }) {
   const organization = useIncidentOrganization(supabase)
   const [draftId, setDraftId] = useState<string | null>(existingDraftId || null)
   const existingDraft = useIncident(supabase, draftId || null)
   const loadedIncident = existingDraft.data || initialIncident
   const [sites, setSites] = useState<SiteOption[]>([])
+  const [facilities, setFacilities] = useState<ReportFacility[]>([])
+  const [facilitiesAvailable, setFacilitiesAvailable] = useState(true)
   const [settings, setSettings] = useState<Record<string, unknown>>({})
   const [settingsLoading, setSettingsLoading] = useState(true)
+  const [settingsLoaded, setSettingsLoaded] = useState(false)
+  const settingsLoadedRef = useRef(false)
   const [settingsError, setSettingsError] = useState('')
   const [submitMessage, setSubmitMessage] = useState('')
   const [submitError, setSubmitError] = useState('')
   const [draftReference, setDraftReference] = useState(existingDraftId ? (initialIncident?.referenceNumber || '') : '')
-  const [draftType, setDraftType] = useState<'manual' | 'offline-pending' | null>(existingDraftId ? 'manual' : null)
-  const [activeStage, setActiveStage] = useState(0)
+  const [draftType, setDraftType] = useState<'manual' | 'offline-pending' | null>(offlineDraft ? 'offline-pending' : existingDraftId ? 'manual' : null)
+  const [identity, setIdentity] = useState<ReportingIdentity | null>(offlineDraft ? 'anonymous' : existingDraftId ? 'me' : null)
+  const [anonymousOwnerToken, setAnonymousOwnerToken] = useState<string | null>(offlineDraft?.ownerToken || null)
+  const [anonymousSaving, setAnonymousSaving] = useState(false)
+  const anonymousSubmissionId = useRef(offlineDraft?.id || crypto.randomUUID())
+  const [activeStage, setActiveStage] = useState(() => Math.max(0, Math.min(offlineDraft?.input.draftStage || 0, stages.length - 1)))
   const [submitConfirmationOpen, setSubmitConfirmationOpen] = useState(false)
   const [submissionSuccessOpen, setSubmissionSuccessOpen] = useState(false)
   const autoConfirmDraftSubmission = useRef(new URLSearchParams(window.location.hash.split('?')[1] || '').get('submit') === '1')
@@ -182,38 +198,38 @@ export function IncidentReportForm({ supabase, reportType, initialTitle, initial
       priority: '',
       gpsCoordinates: '',
       weatherConditions: '',
-      equipmentInvolved: '',
       peopleInvolved: '',
       witnesses: '',
       potentialRootCause: '',
-      digitalSignature: '',
       accuracyConfirmed: false,
       affectedPersonName: '',
       affectedPersonOrganization: '',
       witnessName: '',
       witnessOrganization: '',
       witnessContactDetails: '',
+      ...offlineDraft?.input,
+      locationType: offlineDraft?.input.siteId ? 'site' : offlineDraft?.input.department ? 'department' : undefined,
+      occurrenceDate: formatLocalDate(offlineDraft?.input.occurredAt ? new Date(offlineDraft.input.occurredAt) : null),
+      occurrenceTime: offlineDraft?.input.occurredAt ? new Date(offlineDraft.input.occurredAt).toTimeString().slice(0, 5) : '',
+      digitalSignature: '',
     },
   })
-  const [reporterName, setReporterName] = useState('Authenticated user')
-  const currentReportType = loadedIncident?.reportType || reportType
-
+  const [reporter, setReporter] = useState<{ userId: string; name: string } | null>(null)
+  const reporterName = reporter && reporter.userId === organization.data?.userId ? reporter.name : 'Authenticated user'
   useEffect(() => {
-    if (!organization.data?.userId) {
-      setReporterName('Authenticated user')
-      return
-    }
+    const userId = organization.data?.userId
+    if (!userId) return
 
     let active = true
     void supabase
       .from('profiles')
       .select('full_name')
-      .eq('id', organization.data.userId)
+      .eq('id', userId)
       .maybeSingle()
       .then(({ data, error }) => {
         if (!active) return
         const nextName = typeof data?.full_name === 'string' && data.full_name.trim() ? data.full_name.trim() : 'Authenticated user'
-        setReporterName(error ? 'Authenticated user' : nextName)
+        setReporter({ userId, name: error ? 'Authenticated user' : nextName })
       })
 
     return () => {
@@ -227,9 +243,11 @@ export function IncidentReportForm({ supabase, reportType, initialTitle, initial
     setDraftId(loadedIncident.id)
     setDraftReference(loadedIncident.referenceNumber)
     setDraftType('manual')
+    setIdentity(loadedIncident.isAnonymous ? 'anonymous' : 'me')
     const occurred = loadedIncident.occurredAt ? new Date(loadedIncident.occurredAt) : null
     form.reset({
       reportType: loadedIncident.reportType,
+      locationType: loadedIncident.siteId ? 'site' : loadedIncident.department ? 'department' : undefined,
       title: loadedIncident.title === 'Untitled draft' ? '' : loadedIncident.title,
       description: loadedIncident.description || '',
       occurrenceDate: formatLocalDate(occurred),
@@ -253,7 +271,6 @@ export function IncidentReportForm({ supabase, reportType, initialTitle, initial
       priority: loadedIncident.priority || '',
       gpsCoordinates: loadedIncident.gpsCoordinates || '',
       weatherConditions: loadedIncident.weatherConditions || '',
-      equipmentInvolved: loadedIncident.equipmentInvolved || '',
       peopleInvolved: loadedIncident.peopleInvolved || '',
       witnesses: loadedIncident.witnesses || '',
       potentialRootCause: loadedIncident.potentialRootCause || '',
@@ -262,6 +279,29 @@ export function IncidentReportForm({ supabase, reportType, initialTitle, initial
     })
     setActiveStage(Math.max(0, Math.min(loadedIncident.draftStage || 0, stages.length - 1)))
   }, [form, loadedIncident])
+
+  useEffect(() => {
+    if (identity !== 'anonymous') return
+    let active = true
+    void getAnonymousDraftOwnerToken(supabase).then((token) => {
+      if (active) setAnonymousOwnerToken(token)
+    }).catch(() => {
+      if (active) setSubmitError('Connect to the internet to authorize anonymous draft saving.')
+    })
+    return () => { active = false; setAnonymousOwnerToken(null) }
+  }, [identity, supabase])
+
+  useEffect(() => {
+    if (identity !== 'anonymous') return
+    const sync = () => {
+      void syncOfflineAnonymousDrafts(supabase).then((result) => {
+        if (result.failed) setSubmitError('Some anonymous drafts could not be synchronized. They remain on this device.')
+      }).catch(() => setSubmitError('Unable to synchronize anonymous drafts. They remain on this device.'))
+    }
+    if (navigator.onLine) sync()
+    window.addEventListener('online', sync)
+    return () => window.removeEventListener('online', sync)
+  }, [identity, supabase])
 
   useEffect(() => {
     if (!autoConfirmDraftSubmission.current || !loadedIncident) return
@@ -273,29 +313,50 @@ export function IncidentReportForm({ supabase, reportType, initialTitle, initial
     if (!organization.data?.organizationId) return
     let active = true
     const organizationId = organization.data.organizationId
-    const loadSettings = () => {
-      setSettingsLoading(true)
-      setSettingsError('')
-      void Promise.all([
-        supabase.from('sites').select('id, name').eq('organization_id', organizationId).order('name'),
-        supabase.from('company_settings').select('departments, operational_sites, incident_categories, severity_levels, working_hours').eq('organization_id', organizationId).maybeSingle(),
-      ]).then(([siteResult, settingsResult]) => {
+    settingsLoadedRef.current = false
+    setSettingsLoaded(false)
+    const loadSettings = async () => {
+      const initialLoad = !settingsLoadedRef.current
+      if (initialLoad) {
+        setSettingsLoading(true)
+        setSettingsError('')
+      }
+      try {
+        const [siteResult, settingsResult, facilityResult] = await Promise.all([
+          supabase.from('sites').select('id, name').eq('organization_id', organizationId).order('name'),
+          supabase.from('company_settings').select('departments, operational_sites, incident_categories, severity_levels, working_hours, weather_conditions').eq('organization_id', organizationId).maybeSingle(),
+          supabase.from('facilities').select('id, name, site_id, department_key').eq('organization_id', organizationId).eq('active', true).is('archived_at', null).order('name'),
+        ])
         if (!active) return
-        if (siteResult.error || settingsResult.error) {
+        const facilitySchemaMissing = facilityResult.error?.code === '42703' || facilityResult.error?.code === 'PGRST204'
+        if (siteResult.error || settingsResult.error || (facilityResult.error && !facilitySchemaMissing)) {
+          throw siteResult.error || settingsResult.error || facilityResult.error
+        }
+        setSites(siteResult.data || [])
+        setFacilities(facilityResult.data || [])
+        setFacilitiesAvailable(!facilitySchemaMissing)
+        setSettings(settingsResult.data || {})
+        settingsLoadedRef.current = true
+        setSettingsLoaded(true)
+      } catch (caught) {
+        if (!active) return
+        if (initialLoad) {
           setSettingsError('Unable to load company configuration. Please try again before reporting an incident.')
           setSites([])
+          setFacilities([])
           setSettings({})
         } else {
-          setSites(siteResult.data || [])
-          setSettings(settingsResult.data || {})
+          // A background settings refresh must never replace an in-progress report.
+          console.warn('Unable to refresh company configuration; keeping the last loaded configuration.', caught)
         }
-        setSettingsLoading(false)
-      })
+      } finally {
+        if (active && initialLoad) setSettingsLoading(false)
+      }
     }
     const handleSettingsUpdated = (event: Event) => {
-      if (companySettingsEventMatchesOrganization(event, organizationId)) loadSettings()
+      if (companySettingsEventMatchesOrganization(event, organizationId)) void loadSettings()
     }
-    loadSettings()
+    void loadSettings()
     window.addEventListener(companySettingsUpdatedEvent, handleSettingsUpdated)
     return () => {
       active = false
@@ -321,7 +382,7 @@ export function IncidentReportForm({ supabase, reportType, initialTitle, initial
       />
     )
   }
-  if (settingsLoading) {
+  if (settingsLoading && !settingsLoaded) {
     return (
       <div className="grid gap-5">
         <PageHeader eyebrow="Report incident" title="Report an incident" description="Loading company configuration." />
@@ -329,7 +390,7 @@ export function IncidentReportForm({ supabase, reportType, initialTitle, initial
       </div>
     )
   }
-  if (settingsError) {
+  if (settingsError && !settingsLoaded) {
     return (
       <EmptyState
         icon="settings"
@@ -339,14 +400,14 @@ export function IncidentReportForm({ supabase, reportType, initialTitle, initial
       />
     )
   }
-
-  const configuredSites = sites.filter((site) => configuredSiteNames(settings.operational_sites).some((name) => name.toLowerCase() === site.name.toLowerCase()) || site.id === loadedIncident?.siteId)
-  const departments = configuredOptions(settings.departments, [], loadedIncident?.department || '')
-  const shifts = configuredShiftNames(settings.working_hours, loadedIncident?.shift || '')
+  const configuredSites = sites.filter((site) => configuredSiteNames(settings.operational_sites).some((name) => name.toLowerCase() === site.name.toLowerCase()))
+  const departments = normalizeDepartmentSettings(settings.departments).filter((department) => department.active && !department.deleted)
+  const shifts = configuredShiftNames(settings.working_hours)
+  const weatherOptions = configuredOptions(settings.weather_conditions, [])
   const categories = configuredOptions(settings.incident_categories, [], loadedIncident?.incidentCategory || '')
   const severities = configuredOptions(settings.severity_levels, [], loadedIncident?.severity || '')
 
-  const isSaving = createDraft.isPending || updateDraft.isPending
+  const isSaving = createDraft.isPending || updateDraft.isPending || anonymousSaving
   const isSubmitting = submitIncident.isPending || submitNewIncident.isPending
   const isBusy = isSaving || isSubmitting
 
@@ -354,8 +415,39 @@ export function IncidentReportForm({ supabase, reportType, initialTitle, initial
   const saveDraft = async () => {
     setSubmitError('')
     setSubmitMessage('')
+    if (!identity) {
+      setActiveStage(2)
+      setSubmitError('Choose a reporting identity before saving the draft.')
+      return
+    }
     try {
-      const input = toDraftInput(form.getValues(), activeStage)
+      const input = toDraftInput(form.getValues(), activeStage, loadedIncident?.equipmentInvolved)
+      if (identity === 'anonymous') {
+        if (!anonymousOwnerToken) throw new Error('Connect to the internet to authorize anonymous draft saving first.')
+        setAnonymousSaving(true)
+        if (!navigator.onLine) {
+          await saveOfflineAnonymousDraft(input, anonymousOwnerToken, anonymousSubmissionId.current, draftId || offlineDraft?.serverDraftId || null)
+          setDraftType('offline-pending')
+          setSubmitMessage('Anonymous draft saved on this device and will sync when you reconnect.')
+          return
+        }
+        let saved
+        if (draftType === 'offline-pending') {
+          await saveOfflineAnonymousDraft(input, anonymousOwnerToken, anonymousSubmissionId.current, draftId)
+          const result = await syncOfflineAnonymousDrafts(supabase)
+          const queued = await getOfflineAnonymousDraft(anonymousSubmissionId.current, anonymousOwnerToken)
+          if (!queued.serverDraftId || queued.pending) throw new Error('The anonymous draft remains on this device. Please retry synchronization.')
+          saved = result.saved.find((item) => item.id === queued.serverDraftId) || await getIncident(supabase, queued.serverDraftId)
+        } else {
+          saved = await saveAnonymousIncidentDraft(supabase, draftId, input, anonymousSubmissionId.current, anonymousOwnerToken)
+        }
+        hydratedDraftId.current = saved.id
+        setDraftId(saved.id)
+        setDraftReference(saved.referenceNumber)
+        setDraftType('manual')
+        setSubmitMessage(`Anonymous draft ${saved.referenceNumber} saved.`)
+        return
+      }
       const saved = draftId ? await updateDraft.mutateAsync({ incidentId: draftId, input }) : await createDraft.mutateAsync(input)
       hydratedDraftId.current = saved.id
       setDraftId(saved.id)
@@ -365,18 +457,30 @@ export function IncidentReportForm({ supabase, reportType, initialTitle, initial
       window.setTimeout(() => { window.location.hash = '#my-reports' }, 1500)
     } catch (error) {
       setSubmitError(error instanceof Error ? error.message : 'Unable to save the draft.')
+    } finally {
+      setAnonymousSaving(false)
     }
   }
 
   const submitReport = form.handleSubmit(async (values) => {
     setSubmitError('')
     setSubmitMessage('')
+    if (!identity) {
+      setSubmitError('Choose a reporting identity before submitting.')
+      setActiveStage(2)
+      return
+    }
+    if (!validateLocation(values)) {
+      setActiveStage(1)
+      setSubmitError('Complete the location fields before submitting.')
+      return
+    }
     const candidate: IncidentSubmissionInput = {
-      ...toDraftInput(values, activeStage),
-      title: values.title || '',
-      description: values.description || '',
+      ...toDraftInput(values, activeStage, loadedIncident?.equipmentInvolved),
+      title: values.title || values.incidentCategory || 'Incident',
+      potentialSeverity: values.potentialSeverity || (values.reportType === 'near_miss' ? values.severity : undefined),
       occurredAt: combineOccurrenceDateTime(values) || '',
-      siteId: values.siteId || '',
+      siteId: values.locationType === 'site' ? values.siteId : undefined,
       location: values.location || '',
       severity: values.severity || '',
       incidentCategory: values.incidentCategory || '',
@@ -397,6 +501,24 @@ export function IncidentReportForm({ supabase, reportType, initialTitle, initial
       }
       if (invalidStages.length) setActiveStage(Math.min(...invalidStages))
       setSubmitError(validated.error.issues[0]?.message || 'Please complete the required fields before submitting.')
+      return
+    }
+
+    if (identity === 'anonymous') {
+      if (!navigator.onLine || !draftId || draftType !== 'manual') {
+        setSubmitError('Save and sync your anonymous draft online before submitting.')
+        return
+      }
+      setAnonymousSaving(true)
+      try {
+        const submitted = await submitAnonymousIncidentDraft(supabase, draftId, validated.data)
+        setSubmitMessage(`Report ${submitted.referenceNumber} submitted successfully. Anonymous reporter.`)
+        setSubmissionSuccessOpen(true)
+      } catch (error) {
+        setSubmitError(error instanceof Error ? error.message : 'Unable to submit the anonymous incident.')
+      } finally {
+        setAnonymousSaving(false)
+      }
       return
     }
 
@@ -445,15 +567,59 @@ export function IncidentReportForm({ supabase, reportType, initialTitle, initial
   })
 
   const stageFields: Array<Array<keyof IncidentFormValues>> = [
-    ['title', 'incidentCategory', 'severity', 'occurrenceDate', 'occurrenceTime', 'description'],
-    ['siteId'],
-    ['immediateCorrection'],
+    ['incidentCategory', 'severity', 'occurrenceDate', 'occurrenceTime'],
+    ['locationType', 'siteId', 'department'],
+    [],
     ['accuracyConfirmed'],
   ]
 
+  const validateLocation = (values: IncidentFormValues) => {
+    let valid = true
+    const invalid = (field: keyof IncidentFormValues, message: string) => {
+      form.setError(field, { type: 'validate', message })
+      valid = false
+    }
+    if (!values.locationType) invalid('locationType', 'Select a location type.')
+    if (values.locationType === 'site' && !values.siteId) invalid('siteId', 'Select a site.')
+    if (values.locationType === 'department' && !values.department) invalid('department', 'Select a department.')
+    if (values.locationType === 'site' && values.siteId && !configuredSites.some((site) => site.id === values.siteId)) invalid('siteId', 'Select an active site.')
+    if (values.locationType === 'department' && values.department && !departments.some((department) => department.name === values.department)) invalid('department', 'Select an active department.')
+    if (values.locationType === 'department' && !facilitiesAvailable) invalid('department', 'Department reporting is unavailable until the database migration is applied.')
+    const departmentId = departments.find((department) => department.name === values.department)?.id
+    const matching = facilities.filter((facility) => values.locationType === 'site'
+      ? Boolean(values.siteId && facility.site_id === values.siteId)
+      : Boolean(departmentId && facility.department_key === departmentId))
+    if (facilitiesAvailable && ((values.facilityId && !matching.some((facility) => facility.id === values.facilityId)) || (matching.length && !values.facilityId))) {
+      invalid('facilityId', 'Select an active facility for this location.')
+    }
+    if (!values.weatherConditions) invalid('weatherConditions', 'Select a weather condition.')
+    else if (!weatherOptions.includes(values.weatherConditions)) invalid('weatherConditions', 'Select an active weather condition.')
+    if (!values.shift) invalid('shift', 'Select a shift.')
+    else if (!shifts.includes(values.shift)) invalid('shift', 'Select an active shift.')
+    return valid
+  }
+
   const continueStage = async () => {
     const valid = await form.trigger(stageFields[activeStage])
-    if (valid) setActiveStage((stage) => Math.min(stage + 1, stages.length - 1))
+    if (!valid) return
+    if (activeStage === 0) {
+      const values = form.getValues()
+      let complete = true
+      for (const [field, message] of [
+        ['incidentCategory', 'Event category is required.'],
+        ['severity', 'Severity is required.'],
+        ['occurrenceDate', 'Date is required.'],
+        ['occurrenceTime', 'Time is required.'],
+      ] as const) {
+        if (!values[field]?.trim()) {
+          form.setError(field, { type: 'required', message })
+          complete = false
+        }
+      }
+      if (!complete) return
+    }
+    if (activeStage === 1 && !validateLocation(form.getValues())) return
+    setActiveStage((stage) => Math.min(stage + 1, stages.length - 1))
   }
 
   const handleEvidence = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -465,8 +631,12 @@ export function IncidentReportForm({ supabase, reportType, initialTitle, initial
       return
     }
     try {
-      await uploadEvidence.mutateAsync({ incidentId: draftId, file })
-      setSubmitMessage('Evidence uploaded securely.')
+      setSubmitError('')
+      setSubmitMessage('')
+      const evidence = await uploadEvidence.mutateAsync({ incidentId: draftId, file })
+      setSubmitMessage(evidence.sanitization === 'unverified'
+        ? 'Evidence uploaded privately. It may contain identifying details; sanitization could not be verified.'
+        : 'Evidence uploaded securely.')
     } catch (error) {
       setSubmitError(error instanceof Error ? error.message : 'Unable to upload evidence.')
     }
@@ -505,13 +675,13 @@ export function IncidentReportForm({ supabase, reportType, initialTitle, initial
 
           <Card className="p-5 shadow-none">
             {activeStage === 0 && (
-              <ReportStageEvent form={form} categories={categories} severities={severities} currentReportType={currentReportType} />
+              <ReportStageEvent form={form} categories={categories} severities={severities} />
             )}
             {activeStage === 1 && (
-              <ReportStageLocation form={form} configuredSites={configuredSites} departments={departments} />
+              <ReportStageLocation form={form} configuredSites={configuredSites} departments={departments} shifts={shifts} weatherOptions={weatherOptions} facilities={facilities} facilitiesAvailable={facilitiesAvailable} />
             )}
             {activeStage === 2 && (
-              <ReportStagePeople form={form} reporterName={reporterName} shifts={shifts} />
+              <ReportStagePeople reporterName={reporterName} identity={identity} onChange={setIdentity} locked={Boolean(draftId || draftType === 'offline-pending' || isSaving)} anonymousEnabled />
             )}
             {activeStage === 3 && (
               <ReportStageEvidence form={form} loadedIncident={loadedIncident} isBusy={isBusy} onEvidence={handleEvidence} />

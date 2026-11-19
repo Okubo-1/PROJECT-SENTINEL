@@ -49,27 +49,33 @@ export const incidentDraftSchema = incidentDraftFields.superRefine(addCommonInci
 
 // Final submission reuses the draft fields but makes the information needed to process a report mandatory.
 export const incidentSubmissionSchema = incidentDraftFields.extend({
-  title: z.string().trim().min(3, 'Title is required.').max(240),
-  description: z.string().trim().min(1, 'Describe what happened.').max(10000),
   occurredAt: z.string().datetime({ offset: true, message: 'Occurrence date and time is required.' }),
-  siteId: uuid,
   location: z.string().trim().max(240).optional(),
   severity: z.string().trim().min(1, 'Severity is required.').max(80),
   incidentCategory: z.string().trim().min(1, 'Incident category is required.').max(120),
-  immediateCorrection: z.string().trim().min(1, 'Immediate actions taken are required.').max(5000),
   accuracyConfirmed: z.literal(true, { error: 'Confirm that the report is accurate before submitting.' }),
 }).superRefine((data, context) => {
   addCommonIncidentRules(data, context)
+  if (!data.siteId && !data.department?.trim()) {
+    context.addIssue({ code: 'custom', path: ['siteId'], message: 'Select a site or department.' })
+  }
+  if (data.siteId && data.department?.trim()) {
+    context.addIssue({ code: 'custom', path: ['department'], message: 'Select either a site or a department.' })
+  }
+  if (!data.weatherConditions?.trim()) {
+    context.addIssue({ code: 'custom', path: ['weatherConditions'], message: 'Select a weather condition.' })
+  }
+  if (!data.shift?.trim()) {
+    context.addIssue({ code: 'custom', path: ['shift'], message: 'Select a shift.' })
+  }
   if ((data.reportType === 'incident' || data.reportType === 'environmental_incident') && !data.severity) {
     context.addIssue({ code: 'custom', path: ['severity'], message: 'Actual severity is required for this report type.' })
-  }
-  if (data.reportType === 'near_miss' && !data.potentialSeverity) {
-    context.addIssue({ code: 'custom', path: ['potentialSeverity'], message: 'Potential severity is required for a near miss.' })
   }
 })
 
 // Browser date and time inputs are separate; the form keeps them separate until IncidentReportForm combines them.
-export const incidentFormSchema = incidentDraftFields.extend({
+export const incidentFormSchema = incidentDraftFields.omit({ equipmentInvolved: true }).extend({
+  locationType: z.enum(['site', 'department']).optional(),
   occurrenceDate: z.string().optional(),
   occurrenceTime: z.string().optional(),
   affectedPersonName: z.string().trim().max(240).optional(),

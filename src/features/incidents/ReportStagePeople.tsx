@@ -1,45 +1,27 @@
-import type { UseFormReturn } from 'react-hook-form'
+import { Field, FormSection, Input } from '../../components/ui'
 
-import { Field, FormFull, FormGrid, FormSection, Input, Textarea } from '../../components/ui'
-import type { IncidentFormValues } from './incidentSchemas'
-import { selectClassName } from './reportFormStyles'
+export type ReportingIdentity = 'me' | 'anonymous'
 
-export function ReportStagePeople({ form, reporterName, shifts }: {
-  form: UseFormReturn<IncidentFormValues>
+export function ReportStagePeople({ reporterName, identity = 'me', onChange, locked = false, anonymousEnabled = false }: {
   reporterName: string
-  shifts: string[]
+  identity?: ReportingIdentity | null
+  onChange?: (identity: ReportingIdentity) => void
+  locked?: boolean
+  anonymousEnabled?: boolean
 }) {
   return (
-    <FormSection title="Who was involved?" description="People, immediate response, and initial cause.">
-      <FormGrid>
-        <Field label="Reporter name" htmlFor="incident-reporter">
-          <Input id="incident-reporter" value={reporterName} readOnly aria-readonly="true" />
-        </Field>
-        <Field label="Contractor involved" htmlFor="incident-contractor" error={form.formState.errors.contractorOrganization?.message}>
-          <Input id="incident-contractor" {...form.register('contractorOrganization')} placeholder="Contractor involved" />
-        </Field>
-        <Field label="Shift" htmlFor="incident-shift">
-          <select id="incident-shift" {...form.register('shift')} className={selectClassName}>
-            <option value="">Select shift</option>
-            {shifts.map((shift) => <option value={shift} key={shift}>{shift}</option>)}
-          </select>
-        </Field>
-        <FormFull>
-          <Field label="People involved" htmlFor="incident-people">
-            <Textarea id="incident-people" rows={3} {...form.register('peopleInvolved')} placeholder="Names, roles and injuries sustained" />
-          </Field>
-        </FormFull>
-        <FormFull>
-          <Field label="Immediate actions taken" htmlFor="incident-immediate" required error={form.formState.errors.immediateCorrection?.message}>
-            <Textarea id="incident-immediate" rows={4} {...form.register('immediateCorrection')} placeholder="Describe immediate controls, first aid, isolation, notification, or other response." />
-          </Field>
-        </FormFull>
-        <FormFull>
-          <Field label="Potential root cause" htmlFor="incident-root-cause">
-            <Textarea id="incident-root-cause" rows={3} {...form.register('potentialRootCause')} placeholder="Initial indication only; formal root-cause analysis follows later." />
-          </Field>
-        </FormFull>
-      </FormGrid>
+    <FormSection title="Reporting identity" description={anonymousEnabled ? 'Choose your reporting identity before saving. It cannot be changed afterwards.' : identity === 'anonymous' ? 'This report is anonymous.' : 'This report is associated with your account.'}>
+      {anonymousEnabled && (
+        <fieldset className="mb-4 grid gap-2" disabled={locked}>
+          <legend className="mb-2 text-sm font-medium">Report as me or anonymous</legend>
+          <label className="flex items-center gap-2 text-sm"><input type="radio" name="reporting-identity" checked={identity === 'me'} onChange={() => onChange?.('me')} />Report as me</label>
+          <label className="flex items-center gap-2 text-sm"><input type="radio" name="reporting-identity" checked={identity === 'anonymous'} onChange={() => onChange?.('anonymous')} />Report as anonymous</label>
+        </fieldset>
+      )}
+      {identity !== 'anonymous' && <Field label="Report as me" htmlFor="incident-reporter">
+        <Input id="incident-reporter" value={reporterName} readOnly aria-readonly="true" />
+      </Field>}
+      {identity === 'anonymous' && <p className="text-sm text-muted">Anonymous reporter</p>}
     </FormSection>
   )
 }

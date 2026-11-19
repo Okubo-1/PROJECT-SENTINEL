@@ -3,7 +3,7 @@ import { CheckCircle2, CircleAlert, ClipboardCheck, ClipboardList, Eye, FileWarn
 import type { LucideIcon } from 'lucide-react'
 
 import type { DashboardActivity, DashboardFilters, DashboardIncident, DashboardMetric, DashboardSnapshot } from './types'
-import { effectiveIncidentSeverityLabel, incidentSeverityFilterPatterns, normalizeIncidentReportType, normalizeIncidentSeverity } from '../../../supabase/functions/_shared/incidentReportFilters'
+import { calculateIncidentStatusCounts, effectiveIncidentSeverityLabel, incidentSeverityFilterPatterns, normalizeIncidentReportType } from '../../../supabase/functions/_shared/incidentReportFilters'
 
 const dateRangeDays: Record<DashboardFilters['dateRange'], number | null> = {
   '7d': 7,
@@ -189,22 +189,14 @@ export async function getDashboardSnapshot(
     incidentRows.push(...(page || []) as DashboardIncidentRow[])
     if (!page || page.length < incidentPageSize) break
   }
-  const isHighRisk = (incident: DashboardIncidentRow) => {
-    const supplied = [incident.severity, incident.potential_severity].filter((value) => value?.trim())
-    const normalized = supplied.map(normalizeIncidentSeverity)
-    return normalized.length > 0 && normalized.every(Boolean)
-      && normalized.some((severity) => severity === 'high' || severity === 'critical')
-  }
-  const highRiskIncidents = incidentRows.filter(isHighRisk)
-  const openIncidents = incidentRows.filter((incident) => incident.status !== 'closed')
-  const closedIncidents = incidentRows.filter((incident) => incident.status === 'closed')
+  const incidentStatusCounts = calculateIncidentStatusCounts(incidentRows)
   const incidentMetricValues: Record<string, number> = {
-    'total-incidents': incidentRows.length,
-    'open-incidents': openIncidents.length,
-    'resolved-incidents': closedIncidents.length,
-    'high-risk-incidents': highRiskIncidents.length,
-    'open-high-risk-incidents': highRiskIncidents.filter((incident) => incident.status !== 'closed').length,
-    'closed-high-risk-incidents': highRiskIncidents.filter((incident) => incident.status === 'closed').length,
+    'total-incidents': incidentStatusCounts.total,
+    'open-incidents': incidentStatusCounts.open,
+    'resolved-incidents': incidentStatusCounts.closed,
+    'high-risk-incidents': incidentStatusCounts.highRisk,
+    'open-high-risk-incidents': incidentStatusCounts.openHighRisk,
+    'closed-high-risk-incidents': incidentStatusCounts.closedHighRisk,
     'near-misses': incidentRows.filter((incident) => normalizeIncidentReportType(incident.report_type) === 'near_miss').length,
     'inspections-completed': Number(metricsRow?.inspections_completed || 0),
   }

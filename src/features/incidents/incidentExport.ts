@@ -37,7 +37,7 @@ export function exportRows(items: IncidentSummary[], sites: Array<{ id: string; 
     department: incident.department || 'Not set',
     occurredAt: formatDate(incident.occurredAt),
     submittedAt: formatDateTime(incident.reportedAt),
-    reporter: incident.createdBy,
+    reporter: incident.isAnonymous ? 'Anonymous reporter' : incident.createdBy,
     location: incident.location || 'Not set',
   }))
 }

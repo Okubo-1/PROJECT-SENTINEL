@@ -1,16 +1,21 @@
 import { useState } from 'react'
 import type { SupabaseClient } from '@supabase/supabase-js'
 
-import { Alert, Badge, Button, ConfirmDialog, PageHeader, Skeleton } from '../../components/ui'
+import { Alert, Badge, Button, ConfirmDialog, Dialog, PageHeader, Skeleton } from '../../components/ui'
 import { ClosureAccessSection } from './ClosureAccessSection'
 import { ConfigurationArchiveSection, type ArchivedConfigurationItem } from './ConfigurationArchiveSection'
 import { DepartmentsSection } from './DepartmentsSection'
 import { EmergencyContactsSection } from './EmergencyContactsSection'
+import { FacilitiesSection } from './FacilitiesSection'
 import { IncidentCategoriesSection } from './IncidentCategoriesSection'
+import { InvestigationDeadlinesSection } from './InvestigationDeadlinesSection'
+import { InvestigationTeamsSection } from './InvestigationTeamsSection'
+import { VerifiersSection } from './VerifiersSection'
 import { ConfigurationNameDialog, ContactDialog, ShiftDialog, SiteDialog } from './SettingsDialogs'
 import { SeveritySection } from './SeveritySection'
 import { ShiftsSection } from './ShiftsSection'
 import { SitesSection } from './SitesSection'
+import { WeatherSection } from './WeatherSection'
 import { SafetyPolicySettingsSection } from '../safety-policy/SafetyPolicySettingsSection'
 import { PolicyObjectivesSettingsSection } from '../safety-policy/PolicyObjectivesSettingsSection'
 import { ComplianceFrameworksSection } from '../compliance/ComplianceFrameworksSection'
@@ -23,19 +28,23 @@ import type {
 } from './companySettingsTypes'
 import { useCompanySettings } from './useCompanySettings'
 
-type SectionKey = 'shifts' | 'departments' | 'sites' | 'contacts' | 'severity' | 'categories' | 'safety-policy' | 'policy-objectives' | 'compliance-frameworks' | 'closure' | 'archive'
+type SectionKey = 'shifts' | 'departments' | 'sites' | 'facilities' | 'weather' | 'contacts' | 'severity' | 'categories' | 'safety-policy' | 'policy-objectives' | 'compliance-frameworks' | 'closure' | 'investigation-teams' | 'investigation-deadlines' | 'verifiers' | 'archive'
 type DeleteTarget =
   | { category: 'shift'; item: CompanyShiftSetting }
   | { category: 'department'; item: DepartmentOption }
   | { category: 'site'; item: SiteOption }
   | { category: 'severity'; item: SeverityOption }
   | { category: 'incident_category'; item: IncidentCategoryOption }
+type FacilityCandidate = { type: 'site' | 'department'; name: string }
+type FacilitySetup = { parent: string; name: string }
 
 const NAV_GROUPS: { label: string; items: { key: SectionKey; label: string }[] }[] = [
   { label: 'Organization', items: [
     { key: 'shifts', label: 'Shifts' },
     { key: 'departments', label: 'Departments' },
     { key: 'sites', label: 'Sites' },
+    { key: 'facilities', label: 'Facilities and areas' },
+    { key: 'weather', label: 'Weather conditions' },
   ] },
   { label: 'Emergency', items: [
     { key: 'contacts', label: 'Emergency contacts' },
@@ -43,6 +52,11 @@ const NAV_GROUPS: { label: string; items: { key: SectionKey; label: string }[] }
   { label: 'Safety', items: [
     { key: 'severity', label: 'Severity levels' },
     { key: 'categories', label: 'Incident categories' },
+  ] },
+  { label: 'Investigation Management', items: [
+    { key: 'investigation-teams', label: 'Investigation teams' },
+    { key: 'investigation-deadlines', label: 'Investigation deadlines' },
+    { key: 'verifiers', label: 'Verifiers' },
   ] },
   { label: 'HSSE Policy and Objective Management', items: [
     { key: 'safety-policy', label: 'Safety Policy' },
@@ -74,6 +88,38 @@ export function SettingsPage({ client, organizationId, userId, safetyPolicyOnly 
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null)
   const [restoreTarget, setRestoreTarget] = useState<ArchivedConfigurationItem | null>(null)
   const [archiveVersion, setArchiveVersion] = useState(0)
+  const [facilityCandidates, setFacilityCandidates] = useState<FacilityCandidate[]>([])
+  const [facilitySetups, setFacilitySetups] = useState<FacilitySetup[]>([])
+  const [facilitySetupError, setFacilitySetupError] = useState('')
+
+  const checkFacilitySetup = async (candidates: FacilityCandidate[]) => {
+    setFacilitySetupError('')
+    try {
+      const missing: FacilitySetup[] = []
+      for (const candidate of candidates) {
+        let parent: string
+        let query = client.from('facilities').select('id', { count: 'exact', head: true }).eq('organization_id', organizationId).is('archived_at', null)
+        if (candidate.type === 'site') {
+          const { data, error } = await client.from('sites').select('id').eq('organization_id', organizationId).eq('name', candidate.name).single()
+          if (error || !data) throw new Error(error?.message || 'Unable to find the saved site.')
+          parent = `site:${data.id}`
+          query = query.eq('site_id', data.id)
+        } else {
+          const department = settings.departments.find((item) => item.name === candidate.name && !item.deleted)
+          if (!department) throw new Error('Unable to find the saved department.')
+          parent = `department:${department.id}`
+          query = query.eq('department_key', department.id)
+        }
+        const { count, error } = await query
+        if (error) throw new Error(error.message)
+        if (!count && !missing.some((item) => item.parent === parent)) missing.push({ parent, name: candidate.name })
+      }
+      setFacilitySetups(missing)
+      setFacilityCandidates([])
+    } catch (error) {
+      setFacilitySetupError(error instanceof Error ? error.message : 'Unable to check facilities.')
+    }
+  }
   const lastSavedLabel = settings.lastSavedAt
     ? settings.lastSavedAt.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
     : null
@@ -82,12 +128,17 @@ export function SettingsPage({ client, organizationId, userId, safetyPolicyOnly 
     shifts: settings.shifts.filter((item) => !item.deleted).length,
     departments: settings.departments.filter((item) => !item.deleted).length,
     sites: settings.sites.filter((item) => !item.deleted).length,
+    facilities: null,
+    weather: null,
     contacts: settings.contacts.length,
     severity: settings.severities.filter((item) => !item.deleted).length,
     categories: settings.categories.filter((item) => !item.deleted).length,
     'safety-policy': null,
     'policy-objectives': null,
     'compliance-frameworks': null,
+    'investigation-teams': null,
+    'investigation-deadlines': null,
+    verifiers: null,
     closure: null,
     archive: null,
   }
@@ -131,7 +182,12 @@ export function SettingsPage({ client, organizationId, userId, safetyPolicyOnly 
             draft={settings.departmentDraft}
             dirty={isDirty('departments')}
             onDraftChange={settings.setDepartmentDraft}
-            onAdd={settings.addDepartment}
+            onAdd={() => {
+              const name = settings.departmentDraft.trim()
+              void settings.addDepartment().then((added) => {
+                if (added) setFacilityCandidates((items) => [...items, { type: 'department', name }])
+              })
+            }}
             onEdit={(item) => settings.openNameEditor('department', item)}
             onToggle={settings.toggleDepartment}
             onDelete={(item) => setDeleteTarget({ category: 'department', item })}
@@ -148,6 +204,12 @@ export function SettingsPage({ client, organizationId, userId, safetyPolicyOnly 
             onDelete={(item) => setDeleteTarget({ category: 'site', item })}
           />
         )
+      case 'facilities':
+        return isDirty('sites') || isDirty('departments')
+          ? <Alert tone="warning">Save or discard site and department changes before managing facilities.</Alert>
+          : <FacilitiesSection client={client} organizationId={organizationId} userId={userId} sites={settings.sites} departments={settings.departments} />
+      case 'weather':
+        return <WeatherSection client={client} organizationId={organizationId} userId={userId} />
       case 'contacts':
         return (
           <EmergencyContactsSection
@@ -185,6 +247,12 @@ export function SettingsPage({ client, organizationId, userId, safetyPolicyOnly 
             onDelete={(item) => setDeleteTarget({ category: 'incident_category', item })}
           />
         )
+      case 'investigation-teams':
+        return <InvestigationTeamsSection client={client} organizationId={organizationId} severities={settings.severities} />
+      case 'investigation-deadlines':
+        return <InvestigationDeadlinesSection client={client} organizationId={organizationId} />
+      case 'verifiers':
+        return <VerifiersSection client={client} organizationId={organizationId} />
       case 'safety-policy':
         return <SafetyPolicySettingsSection client={client} />
       case 'policy-objectives':
@@ -264,6 +332,7 @@ export function SettingsPage({ client, organizationId, userId, safetyPolicyOnly 
 
           {settings.error && <Alert tone="danger">{settings.error}</Alert>}
           {settings.message && <Alert tone="success">{settings.message}</Alert>}
+          {facilitySetupError && <Alert tone="danger">{facilitySetupError} <Button variant="outline" size="sm" onClick={() => void checkFacilitySetup(facilityCandidates)}>Retry facility check</Button></Alert>}
 
           {section}
 
@@ -274,8 +343,10 @@ export function SettingsPage({ client, organizationId, userId, safetyPolicyOnly 
                 Unsaved company changes in {settings.dirtySections.length} section{settings.dirtySections.length === 1 ? '' : 's'}
               </div>
               <div className="flex items-center gap-2">
-                <Button variant="ghost" size="sm" onClick={settings.discardChanges}>Discard</Button>
-                <Button size="sm" loading={settings.saving} onClick={() => void settings.saveSettings()}>Save changes</Button>
+                <Button variant="ghost" size="sm" onClick={() => { settings.discardChanges(); setFacilityCandidates([]) }}>Discard</Button>
+                <Button size="sm" loading={settings.saving} onClick={() => void settings.saveSettings().then((saved) => {
+                  if (saved && facilityCandidates.length) void checkFacilitySetup(facilityCandidates)
+                })}>Save changes</Button>
               </div>
             </div>
           )}
@@ -302,7 +373,16 @@ export function SettingsPage({ client, organizationId, userId, safetyPolicyOnly 
         setCode={settings.setSiteCodeDraft}
         editing={Boolean(settings.editingSiteId)}
         error={settings.error}
-        onSave={settings.addSite}
+        onSave={() => {
+          const name = settings.siteDraft.trim()
+          const previous = settings.sites.find((site) => site.id === settings.editingSiteId)
+          void settings.addSite().then((saved) => {
+            if (!saved) return
+            const candidate: FacilityCandidate = { type: 'site', name }
+            if (previous && previous.name === name && previous.code === settings.siteCodeDraft && !settings.dirty) void checkFacilitySetup([candidate])
+            else setFacilityCandidates((items) => [...items, candidate])
+          })
+        }}
       />
 
       <ConfigurationNameDialog
@@ -315,9 +395,29 @@ export function SettingsPage({ client, organizationId, userId, safetyPolicyOnly 
         value={settings.nameEditDraft}
         onChange={settings.setNameEditDraft}
         onClose={settings.closeNameEditor}
-        onSave={() => void settings.saveNameEdit()}
+        onSave={() => {
+          const target = settings.nameEditTarget
+          const name = settings.nameEditDraft.trim()
+          const previous = target?.category === 'department' ? settings.departments.find((item) => item.id === target.id) : undefined
+          void settings.saveNameEdit().then((saved) => {
+            if (!saved || target?.category !== 'department') return
+            const candidate: FacilityCandidate = { type: 'department', name }
+            if (previous?.name === name && !settings.dirty) void checkFacilitySetup([candidate])
+            else setFacilityCandidates((items) => [...items, candidate])
+          })
+        }}
         error={settings.error}
       />
+
+      <Dialog
+        open={facilitySetups.length > 0}
+        onClose={() => setFacilitySetups((items) => items.slice(1))}
+        title={`Set up facilities for ${facilitySetups[0]?.name || ''}`}
+        description="Add facilities or areas now, or skip and manage them later in Settings."
+        footer={<Button variant="outline" onClick={() => setFacilitySetups((items) => items.slice(1))}>Done / Skip</Button>}
+      >
+        {facilitySetups[0] && <FacilitiesSection key={facilitySetups[0].parent} client={client} organizationId={organizationId} userId={userId} sites={settings.sites} departments={settings.departments} initialParent={facilitySetups[0].parent} />}
+      </Dialog>
 
       <ContactDialog
         open={settings.contactOpen}

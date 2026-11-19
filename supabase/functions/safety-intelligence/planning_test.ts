@@ -2,7 +2,7 @@ import { buildSafetyPlanningIndicators } from '../_shared/safetyPlanningIndicato
 import { calculateSafetySnapshot } from '../_shared/safetyIntelligenceCalculations.ts'
 import { asOf, assert, dataset, equal, id, incident, org, scope, site } from './fixtures_test.ts'
 
-Deno.test('planning metrics include every authorized report type and visible drafts', () => {
+Deno.test('planning metrics include submitted report types but exclude drafts', () => {
   const reports = [
     incident(0, { severity: 'Critical', status: 'submitted', site_id: site }),
     incident(1, { severity: 'High', status: 'under_review', report_type: 'near_miss', site_id: site }),
@@ -12,6 +12,7 @@ Deno.test('planning metrics include every authorized report type and visible dra
   const draft = incident(4, { severity: 'critical', status: 'draft', report_type: 'unsafe_condition', site_id: site })
   const data = dataset(reports)
   data.planningIncidents = [...reports, draft]
+  data.draftTotal = 1
   data.planningActions = [
     { id: id(300), organization_id: org, incident_id: reports[0].id, title: 'Critical due today', status: 'pending_verification', due_date: '2026-10-06' },
     { id: id(301), organization_id: org, incident_id: reports[0].id, title: 'Critical overdue', status: 'open', due_date: '2026-10-05' },
@@ -25,18 +26,18 @@ Deno.test('planning metrics include every authorized report type and visible dra
   equal([
     siteSnapshot.openCritical, siteSnapshot.openHigh,
     siteSnapshot.nonOverdueUnfinishedActions, siteSnapshot.criticalLinkedUnfinishedActions,
-  ], [2, 2, 3, 4])
-  equal(result.metrics.incidentCounts?.total, 5)
-  equal(result.metrics.incidentCounts?.open, 4)
+  ], [1, 2, 2, 3])
+  equal(result.metrics.incidentCounts?.total, 4)
+  equal(result.metrics.incidentCounts?.open, 3)
   equal(result.metrics.incidentCounts?.closed, 1)
   equal(result.metrics.incidentCounts?.drafts, 1)
   equal(result.metrics.incidentCounts?.nearMiss, 1)
   const outlook = buildSafetyPlanningIndicators(result)
   equal(outlook.locations[0].drivers.map((item) => item.observation), [
-    '2 open Critical reports.',
-    '4 unfinished actions linked to open Critical reports.',
+    '1 open Critical reports.',
+    '3 unfinished actions linked to open Critical reports.',
     '2 open High reports.',
-    '3 non-overdue unfinished corrective actions.',
+    '2 non-overdue unfinished corrective actions.',
   ])
   assert(outlook.locations[0].drivers[0].advice.includes('control effectiveness'), 'Critical advice omits control verification')
   assert(outlook.locations[0].drivers[0].advice.includes('elimination, substitution or engineering controls'),
