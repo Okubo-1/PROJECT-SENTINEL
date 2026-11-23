@@ -83,16 +83,6 @@ export function ProtectedApp({ session, isDarkMode, onToggleTheme }: { session: 
   const [policyStatusLoaded, setPolicyStatusLoaded] = useState(false)
   const [policyCheckLoading, setPolicyCheckLoading] = useState(true)
   const [policyError, setPolicyError] = useState('')
-<<<<<<< HEAD
-  const policyRequestGeneration = useRef(0)
-  const policyRequest = useRef<{
-    userId: string
-    generation: number
-    promise: Promise<SafetyPolicyStatus | null>
-  } | null>(null)
-  const activePolicyUserId = useRef(session.user.id)
-  const policyVerified = policyStatusLoaded && !policyCheckLoading && !policyError && policyStatus?.required === false
-=======
   const policyVerificationRequest = useRef<{
     userId: string
     promise: Promise<SafetyPolicyStatus | null>
@@ -105,7 +95,6 @@ export function ProtectedApp({ session, isDarkMode, onToggleTheme }: { session: 
   const currentPolicyCheckLoading = !hasPolicyStatusForCurrentUser || (policyCheckLoading && !policyStatusLoaded)
   const currentPolicyError = hasPolicyStatusForCurrentUser ? policyError : ''
   const policyVerified = currentPolicyStatusLoaded && !currentPolicyCheckLoading && !currentPolicyError && currentPolicyStatus?.required === false
->>>>>>> b723469ffd2d5f721d0865f0a9e5d43cb5661c0a
   useIncidentOfflineSync(supabase, policyVerified)
   const closureAccess = useIncidentClosureAccess(
     supabase,
@@ -206,45 +195,6 @@ export function ProtectedApp({ session, isDarkMode, onToggleTheme }: { session: 
     if (isPhoneViewport) window.requestAnimationFrame(() => mobileMenuButtonRef.current?.focus())
   }
 
-<<<<<<< HEAD
-  const verifySafetyPolicy = useCallback(async () => {
-    const userId = session.user.id
-    const activeRequest = policyRequest.current
-    if (activeRequest?.userId === userId) return activeRequest.promise
-
-    const generation = ++policyRequestGeneration.current
-    setPolicyCheckLoading(true)
-    setPolicyError('')
-    const promise = (async () => {
-      try {
-        const currentStatus = await getSafetyPolicyStatus(supabase)
-        if (generation !== policyRequestGeneration.current || activePolicyUserId.current !== userId) return null
-        setPolicyStatus(currentStatus)
-        setPolicyStatusLoaded(true)
-        return currentStatus
-      } catch (caught) {
-        if (generation !== policyRequestGeneration.current || activePolicyUserId.current !== userId) return null
-        setPolicyStatus(null)
-        setPolicyStatusLoaded(false)
-        setPolicyError(caught instanceof Error ? caught.message : 'Unable to verify the Safety Policy.')
-        return null
-      } finally {
-        if (generation === policyRequestGeneration.current && activePolicyUserId.current === userId) {
-          setPolicyCheckLoading(false)
-        }
-        if (policyRequest.current?.generation === generation) policyRequest.current = null
-      }
-    })()
-    policyRequest.current = { userId, generation, promise }
-    return promise
-  }, [session.user.id])
-
-  useEffect(() => {
-    // Load only identity and membership before policy verification; other workspace data waits for the gate.
-    let active = true
-    activePolicyUserId.current = session.user.id
-
-=======
   const verifySafetyPolicy = useCallback(async (userId: string, background = false) => {
     if (policyVerificationUserId.current !== userId) return null
     if (policyVerificationRequest.current?.userId === userId) {
@@ -298,21 +248,15 @@ export function ProtectedApp({ session, isDarkMode, onToggleTheme }: { session: 
     policyVerificationUserId.current = session.user.id
     // Load the profile first, then resolve organization membership and permissions for the workspace.
     let active = true
->>>>>>> b723469ffd2d5f721d0865f0a9e5d43cb5661c0a
     const loadMembership = async () => {
       const { data: profile, error: profileError } = await supabase.from('profiles').select('full_name, organization_id, account_status').eq('id', session.user.id).maybeSingle()
       if (!active) return
       if (profileError) {
-<<<<<<< HEAD
-        if (!active) return
-        setError(profileError.message)
-=======
         console.error('Failed to load the authenticated user profile.', {
           code: profileError.code,
           message: profileError.message,
         })
         setError('Your profile could not be loaded. Please retry or contact your administrator.')
->>>>>>> b723469ffd2d5f721d0865f0a9e5d43cb5661c0a
         setLoading(false)
         return
       }
@@ -329,14 +273,6 @@ export function ProtectedApp({ session, isDarkMode, onToggleTheme }: { session: 
       }
       if (profile?.full_name) setProfileName(profile.full_name)
       if (profile?.organization_id) {
-<<<<<<< HEAD
-        const { data: membership, error: membershipError } = await supabase
-          .from('memberships')
-          .select('role')
-          .eq('user_id', session.user.id)
-          .eq('organization_id', profile.organization_id)
-          .maybeSingle()
-=======
         setOrganizationId(profile.organization_id)
         const [
           { data: membership, error: membershipError },
@@ -345,7 +281,6 @@ export function ProtectedApp({ session, isDarkMode, onToggleTheme }: { session: 
           supabase.from('memberships').select('role').eq('user_id', session.user.id).eq('organization_id', profile.organization_id).maybeSingle(),
           supabase.from('organizations').select('company_name').eq('id', profile.organization_id).maybeSingle(),
         ])
->>>>>>> b723469ffd2d5f721d0865f0a9e5d43cb5661c0a
         if (!active) return
         if (membershipError) {
           console.error('Failed to load the authenticated user membership.', {
@@ -356,17 +291,6 @@ export function ProtectedApp({ session, isDarkMode, onToggleTheme }: { session: 
           setLoading(false)
           return
         }
-<<<<<<< HEAD
-        if (!membership?.role) {
-          setLoading(false)
-          return
-        }
-        const membershipRole = String(membership.role)
-        setOrganizationId(profile.organization_id)
-        setRole(membershipRole)
-        if (membershipRole === 'Super Administrator') {
-          setCustomRolePermissions(null)
-=======
         if (organizationError) {
           console.error('Failed to load the authenticated user organization.', {
             code: organizationError.code,
@@ -399,29 +323,11 @@ export function ProtectedApp({ session, isDarkMode, onToggleTheme }: { session: 
             setCustomRolePermissions([])
           }
           setProfileLoadedForUser(session.user.id)
->>>>>>> b723469ffd2d5f721d0865f0a9e5d43cb5661c0a
         }
         await verifySafetyPolicy(session.user.id)
       }
       if (active) setLoading(false)
     }
-<<<<<<< HEAD
-    void loadMembership().catch((caught: unknown) => {
-      if (!active) return
-      if (import.meta.env.DEV) {
-        console.error('[Auth] Organization membership loading failed', {
-          message: caught instanceof Error ? caught.message : 'Unknown membership loading failure',
-        })
-      }
-      setError('Unable to load your organization membership. Please retry.')
-      setLoading(false)
-    })
-    return () => {
-      active = false
-      if (activePolicyUserId.current === session.user.id) activePolicyUserId.current = ''
-    }
-  }, [session.user.id, verifySafetyPolicy])
-=======
     void loadMembership()
     return () => {
       active = false
@@ -430,7 +336,6 @@ export function ProtectedApp({ session, isDarkMode, onToggleTheme }: { session: 
       }
     }
   }, [session.user.email, session.user.id, verifySafetyPolicy])
->>>>>>> b723469ffd2d5f721d0865f0a9e5d43cb5661c0a
 
   useEffect(() => {
     if (!organizationId || profileLoadedForUser !== session.user.id) return

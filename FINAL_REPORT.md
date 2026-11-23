@@ -1,49 +1,42 @@
-# Investigation Settings & Data Model - Final Report
+# Project Sentinel - Final Report
 
-## Deliverables ✓
+**Date**: November 23, 2026  
+**Status**: Build verified
 
-- **4 database migrations**: investigation_extended_fields, timeline_events, team_members, deadlines (reversible, RLS-secured)
-- **3 React components**: InvestigationTeamsSection, InvestigationDeadlinesSection, VerifiersSection
-- **1 service module**: investigationService.ts (11 functions, Zod schemas)
-- **1 test suite**: investigation_schema.sql (6 cases)
-- **1 integration**: SettingsPage fully updated with new sections
-- **Build status**: ✓ All TypeScript errors resolved, 3103 modules transformed
+## Completed Work
 
-## Files Changed
+- Resolved merge conflict markers in:
+  - `src/features/safety-policy/safetyPolicyService.ts`
+  - `src/features/workspace/ProtectedApp.tsx`
+- Preserved the completed safety policy verification and workspace membership implementation.
+- Verified that no merge conflict markers remain in source, SQL, JSON, or Markdown files.
+- Replaced stale delivery claims with the verified implementation status.
 
-| Category | Files | Lines |
-|----------|-------|-------|
-| Migrations | 4 | 262 |
-| Components | 3 | 484 |
-| Services | 1 | 422 |
-| Tests | 1 | 254 |
-| Documentation | 3 | 902 |
-| **Total** | **15** | **2,324** |
+## Verification Result
 
-## Key Assumptions Applied
+`npm run build` completed successfully:
 
-1. **investigations table** exists; added 9 new columns (level, due_at, witness_statement, etc.)
-2. **Severity levels** stored in company_settings.severity_levels as JSONB array
-3. **Closure-access delegates** (incident_closure_delegates) reused for verifiers (auto-synced)
-4. **Composite keys** (id, organization_id) for tenant isolation throughout
-5. **UI patterns** reused from ClosureAccessSection (search + toggle + list)
+- TypeScript build passed.
+- Vite production bundle passed.
+- 3,037 modules were transformed.
+- The build emitted only the existing large-bundle size advisory.
 
-## Commit Details
+## Investigation Deliverables
 
-- **Hash**: 9aa221f
-- **Status**: Locally committed (no push/deploy)
-- **Date**: 2026-11-17 07:16:35+0100
-- **Message**: feat: Add investigation settings and data model
+The workspace contains the investigation migrations and settings UI:
 
-## Verification Status
+- Investigation team management
+- Investigation deadline configuration
+- Verifier display
+- Investigation timeline and service support
+- Integration in the Settings page
 
-✓ Build succeeds  
-✓ TypeScript type safety verified  
-✓ All components integrate with SettingsPage  
-✓ Migrations follow existing patterns  
-✓ RLS policies applied to new tables  
-✓ Ready for staging deployment
+## Remaining Deployment Checks
 
-## Assumption Transparency
+Database migrations and row-level security policies require validation in the target Supabase environment. A staging deployment should include:
 
-No breaking changes. No existing incident data modified. All migrations are reversible and use safe column additions with defaults.
+1. Apply migrations.
+2. Verify organization isolation.
+3. Verify role permissions.
+4. Test investigation team and deadline workflows.
+5. Run the SQL test suite.
