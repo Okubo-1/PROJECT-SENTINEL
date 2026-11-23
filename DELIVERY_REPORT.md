@@ -27,14 +27,14 @@ The production build emits a chunk-size advisory for the large `index` and `Safe
 
 ## Source and Integration Status
 
-| Area | Status |
-|------|--------|
-| Investigation migrations | Present |
-| Settings UI integration | Present |
-| Investigation service | Present |
-| SQL schema tests | Present |
-| TypeScript investigation tests | Present |
-| Production build | Passing |
+| Area                           | Status     |
+| ------------------------------ | ---------- |
+| Investigation migrations       | Present    |
+| Settings UI integration        | Present    |
+| Investigation service          | Present    |
+| SQL schema tests               | Present    |
+| TypeScript investigation tests | Present    |
+| Production build               | Passing    |
 
 ## Deployment Readiness
 
