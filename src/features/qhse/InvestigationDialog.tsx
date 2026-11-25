@@ -567,9 +567,12 @@ export function InvestigationDialog({ client, investigationId, onClose, onVerifi
 
           <Card className="grid gap-3 p-4 shadow-none">
             <h3 className="font-semibold text-foreground">Attachments</h3>
+            {!canEdit && <p className="text-sm text-muted">You can view attachments, but only an assigned investigator can add or change them.</p>}
             <div className="grid gap-2">
               <p className="text-sm text-foreground">Investigation report (required: PDF or Word)</p>
               <input type="file" accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                aria-label="Upload investigation report"
+                className="block w-full cursor-pointer text-sm text-muted file:mr-3 file:rounded-lg file:border file:border-line file:bg-surface file:px-3 file:py-2 file:text-sm file:font-medium file:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
                 disabled={!canEdit || saving || uploadEvidence.isPending}
                 onChange={(event) => void uploadSelectedFile(event, true)} />
               {report && (
@@ -583,7 +586,10 @@ export function InvestigationDialog({ client, investigationId, onClose, onVerifi
             </div>
             <div className="grid gap-2">
               <p className="text-sm text-foreground">Other attachments (optional)</p>
-              <input type="file" disabled={!canEdit || saving || uploadEvidence.isPending}
+              <input type="file"
+                aria-label="Upload another investigation attachment"
+                className="block w-full cursor-pointer text-sm text-muted file:mr-3 file:rounded-lg file:border file:border-line file:bg-surface file:px-3 file:py-2 file:text-sm file:font-medium file:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={!canEdit || saving || uploadEvidence.isPending}
                 onChange={(event) => void uploadSelectedFile(event, false)} />
               {attachmentIds.map((id) => {
                 const file = detail.data.attachments.find((item) => item.id === id)

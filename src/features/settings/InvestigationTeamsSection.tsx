@@ -26,20 +26,29 @@ export function InvestigationTeamsSection({ client, organizationId, severities }
   const teamMembers = useQuery({
     queryKey: ['investigation-team-members', organizationId],
     queryFn: async () => {
-      const { data, error } = await client
+      const { data: teamRows, error } = await client
         .from('investigation_team_members')
-        .select('id, user_id, severity_level, full_name:profiles(full_name), account_status:profiles(account_status), added_at')
+        .select('id, user_id, severity_level, added_at')
         .eq('organization_id', organizationId)
 
       if (error) throw new Error(error.message)
-      return ((data || []) as Array<Record<string, unknown>>).map((item) => ({
-        id: item.id as string,
-        user_id: item.user_id as string,
-        severity_level: item.severity_level as string,
-        full_name: ((item.full_name as Record<string, unknown>) || {}).full_name as string || 'Unknown',
-        account_status: ((item.account_status as Record<string, unknown>) || {}).account_status as string || 'active',
-        added_at: item.added_at as string,
-      }))
+      const memberIds = [...new Set((teamRows || []).map((item) => item.user_id as string))]
+      const { data: profiles, error: profileError } = memberIds.length
+        ? await client.from('profiles').select('id, full_name, account_status').in('id', memberIds).eq('organization_id', organizationId)
+        : { data: [], error: null }
+      if (profileError) throw new Error(profileError.message)
+      const profileById = new Map((profiles || []).map((profile) => [profile.id as string, profile]))
+      return ((teamRows || []) as Array<Record<string, unknown>>).map((item) => {
+        const profile = profileById.get(item.user_id as string)
+        return {
+          id: item.id as string,
+          user_id: item.user_id as string,
+          severity_level: item.severity_level as string,
+          full_name: (profile?.full_name as string | undefined) || 'Unknown',
+          account_status: (profile?.account_status as string | undefined) || 'active',
+          added_at: item.added_at as string,
+        }
+      })
     },
   })
 

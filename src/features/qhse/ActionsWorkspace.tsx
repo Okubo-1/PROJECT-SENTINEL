@@ -3,7 +3,8 @@ import type { FormEvent, ReactNode } from 'react'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { useQueryClient } from '@tanstack/react-query'
 
-import { Alert, Button, FilterBar, Icon, PageHeader, SegmentedControl, Select, buttonVariants } from '../../components/ui'
+import { Alert, Button, Dialog, Field, FileUpload, FilterBar, Icon, PageHeader, SegmentedControl, Select, Textarea, buttonVariants } from '../../components/ui'
+import type { FileUploadItem } from '../../components/ui'
 import { createAction, downloadQhseFile, getActionsWorkspace, resolveAction, reassignAction, validateQhseFile } from './inspectionActionService'
 import type { ActionRecord, ActionType, EligibleIncident, QhsePerson, QhseSite } from './inspectionActionService'
 import { ActionCreateForm } from './ActionCreateForm'
@@ -182,16 +183,40 @@ export function ActionsWorkspace({ supabase, canManage, assignedOnly = false, sh
     try {
       validateQhseFile(proofFile)
       await resolveAction(supabase, action, resolutionNotes, proofFile)
+      const resolvedAt = new Date().toISOString()
+      setActions((current) => current.map((item) => item.id === action.id ? {
+        ...item,
+        status: 'resolved',
+        resolved_at: resolvedAt,
+        resolved_by: currentUserId,
+        resolution_notes: resolutionNotes.trim(),
+      } : item))
       setResolutionAction(null)
       setResolutionNotes('')
       setProofFile(null)
-      await finishMutation('Action resolved.')
+      setMessage('Action resolved.')
+      // Refresh the register and dependent pages without making the user wait.
+      void finishMutation('Action resolved.').catch((refreshError: unknown) => {
+        setError(refreshError instanceof Error ? refreshError.message : 'Action resolved, but the register could not be refreshed.')
+      })
     } catch (resolveError) {
       setError(resolveError instanceof Error ? resolveError.message : 'Unable to resolve the action.')
     } finally {
       setBusy(false)
     }
   }
+
+  const closeResolution = () => {
+    if (busy) return
+    setResolutionAction(null)
+    setResolutionNotes('')
+    setProofFile(null)
+    setError('')
+  }
+  const resolutionTarget = resolutionAction ? actions.find((action) => action.id === resolutionAction) || null : null
+  const proofFiles: FileUploadItem[] = proofFile
+    ? [{ id: 'action-proof', name: proofFile.name, size: proofFile.size, type: proofFile.type }]
+    : []
 
   const workspaceLoading = loading || (assignedOnly && canViewAllAssignedActions && loadedOrganizationActionsView !== organizationActionsView)
   const requestedActionId = new URLSearchParams(window.location.hash.split('?')[1] || '').get('action')
@@ -329,21 +354,15 @@ export function ActionsWorkspace({ supabase, canManage, assignedOnly = false, sh
         canManage={canManage}
         assignedOnly={assignedOnly}
         busy={busy}
-        resolutionAction={resolutionAction}
-        resolutionNotes={resolutionNotes}
-        proofFile={proofFile}
         sites={sites}
         people={people}
         linkedIncidents={linkedIncidents}
         onToggleResolve={(action) => {
-          setResolutionAction((current) => current === action.id ? null : action.id)
+          setResolutionAction(action.id)
           setResolutionNotes('')
           setProofFile(null)
+          setError('')
         }}
-        onResolutionNotesChange={setResolutionNotes}
-        onProofFileChange={setProofFile}
-        onCancelResolve={() => { setResolutionAction(null); setResolutionNotes(''); setProofFile(null) }}
-        onResolve={(action) => void resolve(action)}
         onReassign={(action, nextAssigneeId) => void reassign(action, nextAssigneeId)}
         onDownloadProof={(action) => {
           if (!action.proof_storage_path || !action.proof_file_name) return
@@ -352,6 +371,57 @@ export function ActionsWorkspace({ supabase, canManage, assignedOnly = false, sh
           })
         }}
       />
+
+      <Dialog
+        open={Boolean(resolutionTarget)}
+        onClose={closeResolution}
+        closeOnBackdrop={!busy}
+        closeOnEscape={!busy}
+        title="Resolve action"
+        description={resolutionTarget?.description}
+        className="sm:max-w-xl"
+      >
+        {resolutionTarget && <div className="grid gap-4">
+          {linkedIncidents.find((incident) => incident.id === resolutionTarget.incident_id)?.is_anonymous && (
+            <Alert tone="warning">Do not include names or details that could identify you.</Alert>
+          )}
+          <Field label="Resolution details" htmlFor="action-resolution-notes" required>
+            <Textarea
+              id="action-resolution-notes"
+              rows={4}
+              value={resolutionNotes}
+              onChange={(event) => setResolutionNotes(event.target.value)}
+              disabled={busy}
+              placeholder="What was done to resolve this action?"
+            />
+          </Field>
+          <Field label="Photo or document evidence" required hint="JPG, PNG, WebP, or PDF up to 10 MB.">
+            <FileUpload
+              files={proofFiles}
+              onFilesSelected={(files) => setProofFile(files[0] || null)}
+              onRemove={() => setProofFile(null)}
+              accept="image/jpeg,image/png,image/webp,application/pdf"
+              maxSizeMb={10}
+              variant="dropzone"
+              label="Upload resolution proof"
+              disabled={busy}
+            />
+          </Field>
+          {error && <Alert tone="danger">{error}</Alert>}
+          <div className="flex flex-wrap justify-end gap-2 border-t border-line pt-4">
+            <Button type="button" variant="outline" size="sm" onClick={closeResolution} disabled={busy}>Cancel</Button>
+            <Button
+              type="button"
+              size="sm"
+              loading={busy}
+              disabled={!resolutionNotes.trim() || !proofFile}
+              onClick={() => void resolve(resolutionTarget)}
+            >
+              Confirm resolution
+            </Button>
+          </div>
+        </div>}
+      </Dialog>
 
       <ActionSuccessModal
         open={successModalOpen}

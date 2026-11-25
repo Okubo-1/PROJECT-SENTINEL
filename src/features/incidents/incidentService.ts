@@ -325,12 +325,25 @@ export async function getIncident(client: SupabaseClient, incidentId: string): P
   ])
   if (peopleError || evidenceError) throw new Error('Unable to load incident details.')
 
+  let reporterName = 'Unknown reporter'
+  if (!incident.is_anonymous && incident.reported_by) {
+    const { data: reporter } = await client
+      .from('profiles')
+      .select('full_name')
+      .eq('id', incident.reported_by)
+      .eq('organization_id', context.organizationId)
+      .maybeSingle()
+    if (typeof reporter?.full_name === 'string' && reporter.full_name.trim()) {
+      reporterName = reporter.full_name.trim()
+    }
+  }
+
   return {
     ...toIncidentSummary(incident as IncidentRow),
     description: incident.description,
     workActivityContext: incident.work_activity_context,
     shift: incident.shift,
-    reportedBy: incident.is_anonymous ? 'Anonymous reporter' : incident.reported_by,
+    reportedBy: incident.is_anonymous ? 'Anonymous reporter' : reporterName,
     contractorInvolved: incident.contractor_involved,
     contractorOrganization: incident.contractor_organization,
     environmentalImpact: incident.environmental_impact,

@@ -1,14 +1,17 @@
 import type { ChangeEvent } from 'react'
 import type { UseFormReturn } from 'react-hook-form'
 
-import { Field, FormSection, Icon } from '../../components/ui'
+import { Alert, Field, FormSection, Icon } from '../../components/ui'
 import type { IncidentFormValues } from './incidentSchemas'
-import type { IncidentDetail } from './incidentTypes'
+import type { IncidentEvidence } from './incidentTypes'
 
-export function ReportStageEvidence({ form, loadedIncident, isBusy, onEvidence }: {
+export function ReportStageEvidence({ form, evidence, isBusy, isUploading, message, error, onEvidence }: {
   form: UseFormReturn<IncidentFormValues>
-  loadedIncident: IncidentDetail | undefined
+  evidence: IncidentEvidence[]
   isBusy: boolean
+  isUploading: boolean
+  message?: string
+  error?: string
   onEvidence: (event: ChangeEvent<HTMLInputElement>) => void
 }) {
   return (
@@ -35,16 +38,20 @@ export function ReportStageEvidence({ form, loadedIncident, isBusy, onEvidence }
         </label>
       </div>
 
-      {loadedIncident?.evidence.length ? (
-        <ul className="mt-4 grid gap-2" aria-label="Existing evidence">
-          {loadedIncident.evidence.map((evidence) => (
-            <li key={evidence.id} className="flex items-center gap-2 rounded-xl border border-line px-3 py-2 text-sm text-muted">
-              <Icon name="file" size={14} />
-              <span className="truncate">{evidence.originalFilename}</span>
+      {isUploading && <p className="mt-3 text-sm text-muted" role="status">Uploading evidence…</p>}
+      {message && <Alert tone="success" className="mt-3">{message}</Alert>}
+      {error && <Alert tone="danger" className="mt-3">{error}</Alert>}
+
+      {evidence.length > 0 && (
+        <ul className="mt-4 grid gap-2" aria-label="Attached evidence">
+          {evidence.map((item) => (
+            <li key={item.id} className="flex items-center gap-2 rounded-xl border border-line px-3 py-2 text-sm text-muted">
+              <Icon name="fileCheck" size={14} className="text-brand" />
+              <span className="truncate">{item.originalFilename}</span>
             </li>
           ))}
         </ul>
-      ) : null}
+      )}
 
       <Field className="mt-4" error={form.formState.errors.accuracyConfirmed?.message}>
         <label className="flex items-start gap-2 text-sm text-foreground">

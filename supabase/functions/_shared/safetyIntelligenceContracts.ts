@@ -62,7 +62,7 @@ export const safetyClosureSchema = z.object({
   corrective_action: z.string(),
 })
 export const safetySiteSchema = z.object({ id: uuid, organization_id: uuid, name: z.string() })
-export const safetyFacilitySchema = safetySiteSchema.extend({ site_id: uuid })
+export const safetyFacilitySchema = safetySiteSchema.extend({ site_id: uuid.nullable() })
 export const safetyRowsSchema = z.object({
   incidents: z.array(safetyIncidentSchema), actions: z.array(safetyActionSchema),
   investigations: z.array(safetyInvestigationSchema), causes: z.array(safetyCauseSchema),

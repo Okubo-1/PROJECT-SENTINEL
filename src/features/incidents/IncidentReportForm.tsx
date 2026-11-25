@@ -30,7 +30,7 @@ import type { AnonymousDraftQueueItem } from './anonymousDraftQueue'
 import { companySettingsEventMatchesOrganization, companySettingsUpdatedEvent } from '../../lib/companySettingsSync'
 import { normalizeDepartmentSettings } from '../settings/companySettingsTypes'
 import { useCreateIncidentDraft, useIncident, useIncidentOrganization, useSubmitIncident, useSubmitNewIncident, useUpdateIncidentDraft, useUploadIncidentEvidence } from './useIncidentData'
-import type { IncidentDetail, IncidentDraftInput, IncidentReportType, IncidentSubmissionInput } from './incidentTypes'
+import type { IncidentDetail, IncidentDraftInput, IncidentEvidence, IncidentReportType, IncidentSubmissionInput } from './incidentTypes'
 
 const stages = ['Event', 'Location & context', 'People', 'Evidence & sign-off'] as const
 
@@ -168,6 +168,9 @@ export function IncidentReportForm({ supabase, reportType, initialTitle, initial
   const [settingsError, setSettingsError] = useState('')
   const [submitMessage, setSubmitMessage] = useState('')
   const [submitError, setSubmitError] = useState('')
+  const [uploadedEvidence, setUploadedEvidence] = useState<IncidentEvidence[]>([])
+  const [evidenceMessage, setEvidenceMessage] = useState('')
+  const [evidenceError, setEvidenceError] = useState('')
   const [draftReference, setDraftReference] = useState(existingDraftId ? (initialIncident?.referenceNumber || '') : '')
   const [draftType, setDraftType] = useState<'manual' | 'offline-pending' | null>(offlineDraft ? 'offline-pending' : existingDraftId ? 'manual' : null)
   const [identity, setIdentity] = useState<ReportingIdentity | null>(offlineDraft ? 'anonymous' : existingDraftId ? 'me' : null)
@@ -409,7 +412,9 @@ export function IncidentReportForm({ supabase, reportType, initialTitle, initial
 
   const isSaving = createDraft.isPending || updateDraft.isPending || anonymousSaving
   const isSubmitting = submitIncident.isPending || submitNewIncident.isPending
-  const isBusy = isSaving || isSubmitting
+  const isBusy = isSaving || isSubmitting || uploadEvidence.isPending
+  const evidenceItems = [...(loadedIncident?.evidence ?? []), ...uploadedEvidence]
+    .filter((item, index, all) => all.findIndex((candidate) => candidate.id === item.id) === index)
 
   // A new form creates a manual draft; reopening one updates that same draft and preserves its reference for later edits.
   const saveDraft = async () => {
@@ -505,13 +510,32 @@ export function IncidentReportForm({ supabase, reportType, initialTitle, initial
     }
 
     if (identity === 'anonymous') {
-      if (!navigator.onLine || !draftId || draftType !== 'manual') {
-        setSubmitError('Save and sync your anonymous draft online before submitting.')
+      if (!navigator.onLine) {
+        setSubmitError('Connect to the internet to submit an anonymous report.')
         return
       }
+      let activeDraftId = draftId || offlineDraft?.serverDraftId || null
       setAnonymousSaving(true)
       try {
-        const submitted = await submitAnonymousIncidentDraft(supabase, draftId, validated.data)
+        // Anonymous reports require an online server draft. Create or refresh it
+        // automatically instead of forcing the reporter to save manually first.
+        if (!activeDraftId || draftType !== 'manual') {
+          if (!anonymousOwnerToken) throw new Error('Connect to the internet to authorize anonymous submission.')
+          const saved = await saveAnonymousIncidentDraft(
+            supabase,
+            activeDraftId,
+            toDraftInput(values, activeStage, loadedIncident?.equipmentInvolved),
+            anonymousSubmissionId.current,
+            anonymousOwnerToken,
+          )
+          activeDraftId = saved.id
+          hydratedDraftId.current = saved.id
+          setDraftId(saved.id)
+          setDraftReference(saved.referenceNumber)
+          setDraftType('manual')
+        }
+        if (!activeDraftId) throw new Error('Unable to prepare the anonymous draft for submission.')
+        const submitted = await submitAnonymousIncidentDraft(supabase, activeDraftId, validated.data)
         setSubmitMessage(`Report ${submitted.referenceNumber} submitted successfully. Anonymous reporter.`)
         setSubmissionSuccessOpen(true)
       } catch (error) {
@@ -626,19 +650,20 @@ export function IncidentReportForm({ supabase, reportType, initialTitle, initial
     const file = event.target.files?.[0]
     event.target.value = ''
     if (!file) return
+    setEvidenceMessage('')
+    setEvidenceError('')
     if (!draftId) {
-      setSubmitError('Save the draft before adding evidence.')
+      setEvidenceError('Save the draft before adding evidence.')
       return
     }
     try {
-      setSubmitError('')
-      setSubmitMessage('')
       const evidence = await uploadEvidence.mutateAsync({ incidentId: draftId, file })
-      setSubmitMessage(evidence.sanitization === 'unverified'
+      setUploadedEvidence((current) => [...current.filter((item) => item.id !== evidence.id), evidence])
+      setEvidenceMessage(evidence.sanitization === 'unverified'
         ? 'Evidence uploaded privately. It may contain identifying details; sanitization could not be verified.'
         : 'Evidence uploaded securely.')
     } catch (error) {
-      setSubmitError(error instanceof Error ? error.message : 'Unable to upload evidence.')
+      setEvidenceError(error instanceof Error ? error.message : 'Unable to upload evidence.')
     }
   }
 
@@ -684,7 +709,15 @@ export function IncidentReportForm({ supabase, reportType, initialTitle, initial
               <ReportStagePeople reporterName={reporterName} identity={identity} onChange={setIdentity} locked={Boolean(draftId || draftType === 'offline-pending' || isSaving)} anonymousEnabled />
             )}
             {activeStage === 3 && (
-              <ReportStageEvidence form={form} loadedIncident={loadedIncident} isBusy={isBusy} onEvidence={handleEvidence} />
+              <ReportStageEvidence
+                form={form}
+                evidence={evidenceItems}
+                isBusy={isBusy}
+                isUploading={uploadEvidence.isPending}
+                message={evidenceMessage}
+                error={evidenceError}
+                onEvidence={handleEvidence}
+              />
             )}
           </Card>
 
